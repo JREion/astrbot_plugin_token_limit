@@ -2,6 +2,29 @@
 
 本文档记录每个版本对插件结构、配置、页面和运行逻辑的变动。
 
+## 0.4.1 - 2026-06-08
+
+优化“历史 token 用量统计”弹窗的图表密度、下拉菜单状态展示和重新进入时的默认状态。
+
+- `metadata.yaml`
+  - 版本号更新为 `0.4.1`。
+- `backend/history_stats.py`
+  - `_format_history_tokens()` 增加小数位参数，支持近 24 小时和近一个月柱顶数值使用 1 位小数。
+  - 新增 `_hour_range_label()` 和 `_day_range_label()`，用于多小时、多日聚合后的横坐标标签。
+  - `api_get_history()` 在选中群聊时返回 `range_total_tokens` 和 `range_total_display`，供页面显示当前时间跨度内该群 token 用量总和。
+  - `_history_recent_hour_bars()` 支持按多小时聚合；随后同版本迭代中，近 24 小时恢复返回 24 个小时原始桶，由页面按宽度动态聚合。
+  - `_history_recent_day_bars()` 支持按多日聚合；近一个月从 30 根日柱调整为 10 根 3 天柱，并使用英文月份缩写显示横坐标。
+- `pages/dashboard/index.html`
+  - “插件功能”按钮顺序调整为：黄色“插件基础配置 ...”在最上方，其下为“用量超限策略配置”和“历史 token 用量统计”。
+  - 历史统计弹窗的工具栏新增 `#historyRangeTotal` 右侧总量显示区域。
+  - 新增 `renderHistoryTotal()`，根据 `history` API 返回值展示选中群聊在当前时间跨度内的 token 总量；未选群聊时保持为空。
+  - 新增 `aggregateHistoryBars()`、`resolveHistoryBarsForViewport()` 和 `handleHistoryResize()`，近 24 小时图表优先使用 2 小时聚合，空间不足时依次降为 3 小时、4 小时聚合。
+  - 群聊下拉菜单中状态圆点移动到每日 token 用量数字前方，不再放在群号前方。
+  - 每次打开历史统计弹窗时重置为“选择群聊 ...”和“近 24 小时”，并恢复展示历史总量 Top N。
+  - 切换群聊或时间跨度时会清空旧总量占位，避免加载期间短暂显示过期数据。
+- `STRUCTURE.md`
+  - 更新到 v0.4.1，补充历史统计 API 返回字段、图表聚合粒度、`#historyRangeTotal` 元素映射和弹窗重置规则。
+
 ## 0.4.0 - 2026-06-08
 
 新增“历史 token 用量统计”能力，并把历史统计后端拆分到独立 mixin。

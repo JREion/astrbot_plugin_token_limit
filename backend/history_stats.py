@@ -20,6 +20,7 @@ HISTORY_SYNC_MIN_INTERVAL = timedelta(minutes=5)
 HISTORY_BACKGROUND_SYNC_INTERVAL = 3600
 HISTORY_DEFAULT_TOP_LIMIT = 10
 HISTORY_RANGE_KEYS = {"24h", "7d", "30d", "all"}
+MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
 @dataclass(frozen=True)
@@ -45,12 +46,14 @@ def _normalize_history_group_id(value: Any) -> str:
     return text
 
 
-def _format_history_tokens(value: int) -> str:
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.2f} M"
-    if value >= 1_000:
-        return f"{value / 1_000:.2f} K"
-    return str(value)
+def _format_history_tokens(value: int, decimals: int = 2) -> str:
+    normalized = max(0, int(value or 0))
+    precision = max(0, int(decimals))
+    if normalized >= 1_000_000:
+        return f"{normalized / 1_000_000:.{precision}f} M"
+    if normalized >= 1_000:
+        return f"{normalized / 1_000:.{precision}f} K"
+    return str(normalized)
 
 
 def _local_timezone() -> tzinfo:
@@ -92,6 +95,35 @@ def _month_key(value: datetime) -> str:
 
 def _hour_label(value: datetime) -> str:
     return value.astimezone(_local_timezone()).strftime("%H:00")
+
+
+def _hour_range_label(start: datetime, end: datetime) -> str:
+    if start == end:
+        return _hour_label(start)
+    local_tz = _local_timezone()
+    start_local = start.astimezone(local_tz)
+    end_local = end.astimezone(local_tz)
+    return f"{start_local:%H}-{end_local:%H}"
+
+
+def _month_abbr(month: int) -> str:
+    if 1 <= month <= 12:
+        return MONTH_ABBR[month - 1]
+    return f"{month:02d}"
+
+
+def _day_range_label(start, end, use_month_name: bool = False) -> str:
+    if use_month_name:
+        if start == end:
+            return f"{_month_abbr(start.month)} {start:%d}"
+        if start.month == end.month:
+            return f"{_month_abbr(start.month)} {start:%d}-{end:%d}"
+        return f"{_month_abbr(start.month)} {start:%d}-{_month_abbr(end.month)} {end:%d}"
+    if start == end:
+        return start.strftime("%m-%d")
+    if start.month == end.month:
+        return f"{start:%m-%d}-{end:%d}"
+    return f"{start:%m-%d}-{end:%m-%d}"
 
 
 class HistoryStatsMixin:
@@ -365,12 +397,16 @@ class HistoryStatsMixin:
             groups = self._history_dropdown_groups(usage_payload)
             known_groups = stats.get("groups", {})
             selected_group_id = group_id if group_id in known_groups else ""
+            range_total_tokens = 0
+            range_total_display = ""
             if selected_group_id:
                 bars = self._history_group_bars(
                     known_groups[selected_group_id],
                     range_key,
                     _now_utc(),
                 )
+                range_total_tokens = sum(int(bar.get("tokens") or 0) for bar in bars)
+                range_total_display = _format_history_tokens(range_total_tokens)
             else:
                 bars = self._history_top_bars(stats, top_limit)
 
@@ -380,6 +416,8 @@ class HistoryStatsMixin:
                     "selected_group_id": selected_group_id,
                     "range": range_key,
                     "bars": bars,
+                    "range_total_tokens": range_total_tokens,
+                    "range_total_display": range_total_display,
                     "synced_at": _iso_utc(_now_utc()),
                     "top_limit": top_limit,
                 }
@@ -452,11 +490,23 @@ class HistoryStatsMixin:
             hours = {}
 
         if range_key == "24h":
-            return self._history_recent_hour_bars(hours, now, 24)
+            return self._history_recent_hour_bars(
+                hours,
+                now,
+                24,
+                display_decimals=1,
+            )
         if range_key == "7d":
             return self._history_recent_day_bars(hours, now, 7)
         if range_key == "30d":
-            return self._history_recent_day_bars(hours, now, 30)
+            return self._history_recent_day_bars(
+                hours,
+                now,
+                30,
+                bucket_days=3,
+                display_decimals=1,
+                month_name_labels=True,
+            )
         return self._history_all_bars(hours)
 
     def _history_recent_hour_bars(
@@ -464,15 +514,33 @@ class HistoryStatsMixin:
         hours: dict[str, Any],
         now: datetime,
         count: int,
+        bucket_hours: int = 1,
+        display_decimals: int = 2,
     ) -> list[dict[str, Any]]:
         end_hour = _hour_start(now)
         start_hour = end_hour - timedelta(hours=count - 1)
         values = self._history_hour_values(hours)
         bars = []
-        for index in range(count):
-            bucket = start_hour + timedelta(hours=index)
-            tokens = values.get(_iso_utc(bucket), 0)
-            bars.append(self._history_bar(_hour_label(bucket), tokens, bucket=_iso_utc(bucket)))
+        step = max(1, int(bucket_hours or 1))
+        for index in range(0, count, step):
+            bucket_start = start_hour + timedelta(hours=index)
+            bucket_end = min(
+                bucket_start + timedelta(hours=step - 1),
+                end_hour,
+            )
+            tokens = 0
+            cursor = bucket_start
+            while cursor <= bucket_end:
+                tokens += values.get(_iso_utc(cursor), 0)
+                cursor += timedelta(hours=1)
+            bars.append(
+                self._history_bar(
+                    _hour_range_label(bucket_start, bucket_end),
+                    tokens,
+                    bucket=_iso_utc(bucket_start),
+                    display_decimals=display_decimals,
+                )
+            )
         return bars
 
     def _history_recent_day_bars(
@@ -480,6 +548,9 @@ class HistoryStatsMixin:
         hours: dict[str, Any],
         now: datetime,
         count: int,
+        bucket_days: int = 1,
+        display_decimals: int = 2,
+        month_name_labels: bool = False,
     ) -> list[dict[str, Any]]:
         local_tz = _local_timezone()
         today = now.astimezone(local_tz).date()
@@ -489,10 +560,30 @@ class HistoryStatsMixin:
             bucket_day = bucket_time.astimezone(local_tz).date()
             if bucket_day in totals:
                 totals[bucket_day] += tokens
-        return [
-            self._history_bar(day.strftime("%m-%d"), tokens, bucket=day.isoformat())
-            for day, tokens in sorted(totals.items())
-        ]
+
+        bars = []
+        step = max(1, int(bucket_days or 1))
+        for index in range(0, count, step):
+            bucket_start = first_day + timedelta(days=index)
+            bucket_end = min(bucket_start + timedelta(days=step - 1), today)
+            bucket_tokens = 0
+            cursor = bucket_start
+            while cursor <= bucket_end:
+                bucket_tokens += totals.get(cursor, 0)
+                cursor += timedelta(days=1)
+            bars.append(
+                self._history_bar(
+                    _day_range_label(
+                        bucket_start,
+                        bucket_end,
+                        use_month_name=month_name_labels,
+                    ),
+                    bucket_tokens,
+                    bucket=bucket_start.isoformat(),
+                    display_decimals=display_decimals,
+                )
+            )
+        return bars
 
     def _history_all_bars(self, hours: dict[str, Any]) -> list[dict[str, Any]]:
         buckets = list(self._history_iter_hours(hours))
@@ -552,12 +643,13 @@ class HistoryStatsMixin:
         tokens: int,
         bucket: str = "",
         group_id: str = "",
+        display_decimals: int = 2,
     ) -> dict[str, Any]:
         normalized_tokens = max(0, int(tokens or 0))
         return {
             "label": re.sub(r"\s+", " ", str(label or "")).strip(),
             "tokens": normalized_tokens,
-            "display": _format_history_tokens(normalized_tokens),
+            "display": _format_history_tokens(normalized_tokens, display_decimals),
             "bucket": bucket,
             "group_id": group_id,
         }

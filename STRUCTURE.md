@@ -1,6 +1,6 @@
 # STRUCTURE
 
-本文档记录 v0.4.0 版本的插件结构、内部 API、页面元素映射和主要函数职责。
+本文档记录 v0.4.1 版本的插件结构、内部 API、页面元素映射和主要函数职责。
 
 ## 文件结构
 
@@ -37,7 +37,7 @@ astrbot_plugin_token_limit/
 ### metadata.yaml
 
 - `name`：插件名称，当前为 `astrbot_plugin_token_limit`。
-- `version`：当前版本 `0.4.0`。
+- `version`：当前版本 `0.4.1`。
 - `repo`：插件仓库地址。
 - `support_platforms`：默认支持 `aiocqhttp`、`qq_official`、`qq_official_webhook`。
 - `pages`：声明 `dashboard` Plugin Page，页面文件为 `pages/dashboard/index.html`。
@@ -211,10 +211,10 @@ astrbot_plugin_token_limit/
 
 - `_history_ok()` / `_history_error()`：历史 API 响应。
 - `_normalize_history_group_id()`：标准化群号。
-- `_format_history_tokens()`：格式化 token。
+- `_format_history_tokens()`：格式化 token，支持指定 `K` / `M` 小数位数。
 - `_local_timezone()` / `_now_utc()`：时间工具。
 - `_parse_datetime()` / `_iso_utc()` / `_hour_start()`：UTC 小时桶规范化。
-- `_month_key()` / `_hour_label()`：图表标签格式化。
+- `_month_key()` / `_hour_label()` / `_hour_range_label()` / `_day_range_label()`：图表标签格式化。
 
 ### Mixin 函数
 
@@ -246,14 +246,15 @@ astrbot_plugin_token_limit/
   - 调用 `_build_usage_payload()` 获取当前限流群下拉菜单、每日用量和状态圆点。
   - 未选择群聊时返回历史总量 Top N。
   - 选择群聊时按时间范围返回趋势柱状图。
+  - 选择群聊时额外返回 `range_total_tokens` 和 `range_total_display`，用于显示当前时间跨度内该群 token 用量总和。
 - `_history_dropdown_groups()`：生成当前 `limited_groups` 下拉菜单数据，状态为 `normal`、`fallback`、`stopped`。
 - `_history_top_bars()`：按 `total_tokens` 降序返回 Top N。
 - `_history_group_bars()`：按 `24h`、`7d`、`30d`、`all` 分派桶聚合。
-- `_history_recent_hour_bars()`：近 24 小时按小时展示。
-- `_history_recent_day_bars()`：近 7 天/近一个月按日展示。
+- `_history_recent_hour_bars()`：近 24 小时按小时返回原始桶；页面根据宽度动态聚合为 2、3 或 4 小时桶。
+- `_history_recent_day_bars()`：近 7 天按日展示；近一个月按 3 天聚合，并使用英文月份缩写标签。
 - `_history_all_bars()`：历史总和短跨度按日展示，超过 31 天按月展示。
 - `_history_hour_values()` / `_history_iter_hours()`：遍历规范化小时桶。
-- `_history_bar()`：统一柱状图数据结构。
+- `_history_bar()`：统一柱状图数据结构，可为近 24 小时和近一个月柱顶数值指定 1 位小数显示。
 
 ## pages/dashboard/index.html
 
@@ -272,9 +273,9 @@ astrbot_plugin_token_limit/
   - `.usage-value.fallback` / `.usage-value.stopped`：黄色/红色用量值。
   - `.progress-fill.fallback` / `.progress-fill.stopped`：黄色/红色进度条。
 - 右侧 `.panel`：插件功能。
+  - `#openConfigBtn`：打开插件基础配置，位于功能按钮区最上方。
   - `#openStrategyBtn`：打开“用量超限策略配置”。
   - `#openHistoryBtn`：打开“历史 token 用量统计”。
-  - `#openConfigBtn`：打开插件基础配置。
   - `#statusLine`：插件启用状态。
 
 ### 弹窗元素
@@ -288,6 +289,7 @@ astrbot_plugin_token_limit/
 - `#historyOverlay`：历史统计弹窗。
   - `#groupSelect` / `#groupSelectTrigger` / `#groupSelectMenu`：自绘群聊下拉菜单。
   - `#rangeSelect` / `#rangeSelectTrigger` / `#rangeSelectMenu`：自绘时间跨度下拉菜单。
+  - `#historyRangeTotal`：右侧总量占位；选中群聊后显示该群当前时间跨度内 token 用量总和。
   - `#historyYAxis`：动态纵轴标签。
   - `#historyChart`：柱状图容器。
   - `#historyXAxis`：动态横轴标签。
@@ -307,6 +309,11 @@ astrbot_plugin_token_limit/
   - `selectedHistoryGroup()`：当前选中群。
   - `reloadHistory()` / `loadHistory()`：请求 `history` API。
   - `renderHistoryControls()`：渲染两个下拉菜单。
+  - `renderHistoryTotal()`：渲染历史弹窗右侧的当前时间跨度用量总和；未选群聊时保持为空。
+  - `formatHistoryTokenNumber()`：按指定小数位格式化历史图柱顶数值。
+  - `aggregateHistoryBars()`：前端按指定小时数聚合近 24 小时原始小时桶。
+  - `resolveHistoryBarsForViewport()`：根据图表可用宽度选择 2、3 或 4 小时聚合粒度。
+  - `handleHistoryResize()`：历史弹窗打开时随窗口宽度变化重新计算 24 小时聚合粒度。
   - `renderHistoryChart()`：渲染动态轴、数值标签和柱状图动画。
   - `formatTokenNumber()`：前端轴标签格式化。
 - 弹窗：`openConfig()`、`closeConfig()`、`openStrategy()`、`closeStrategy()`、`openHistory()`、`closeHistory()`、`openRemark()`、`closeRemark()`。
@@ -318,9 +325,13 @@ astrbot_plugin_token_limit/
 - 所有按钮都有 `:hover` 与 `:active` 颜色/位移反馈。
 - 备注显示在群号右侧，格式为 `（备注）`；铅笔图标跟在群号或备注右侧。
 - 配置 textarea 会把保存值中的显式 `\n` 渲染为真实换行。
-- 历史统计下拉菜单左侧状态圆点：绿色正常、黄色回退、红色停止响应。
+- 历史统计群聊下拉菜单中，状态圆点放在每日 token 用量数字前方：绿色正常、黄色回退、红色停止响应。
 - 未选择群聊时，历史图展示历史总 token Top N 群聊。
 - 选择群聊后，按 `近 24 小时`、`近 7 天`、`近一个月`、`历史总和` 展示趋势。
+- 每次重新打开历史统计弹窗时，群聊下拉菜单恢复为“选择群聊 ...”，时间跨度恢复为“近 24 小时”，图表恢复历史总 token Top N。
+- 近 24 小时柱状图由页面按宽度动态选择聚合粒度：优先 2 小时 12 根柱；空间不足时降为 3 小时 8 根柱；仍不足时降为 4 小时 6 根柱。
+- 近一个月柱状图按 3 天聚合，横坐标月份使用英文缩写，例如 `Jun 06-08`；近 24 小时和近一个月柱顶数值保留 1 位小数，其他口径保持原有小数位。
+- 选中群聊后，两个下拉菜单右侧显示所选时间跨度内该群 token 用量总和。
 - 柱状图切换数据时通过高度过渡动画平滑变化；横纵坐标和柱顶数值由数据动态生成。
 
 ## 配置与统计同步逻辑

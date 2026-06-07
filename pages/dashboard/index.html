@@ -261,6 +261,7 @@
         padding: 12px 14px;
         cursor: pointer;
         font-weight: 700;
+        margin-bottom: 10px;
         transition:
           background 150ms ease,
           border-color 150ms ease,
@@ -494,9 +495,9 @@
 
       .history-toolbar {
         display: grid;
-        grid-template-columns: minmax(260px, 1fr) minmax(180px, 0.38fr);
+        grid-template-columns: minmax(260px, 1fr) minmax(180px, 0.38fr) minmax(180px, 0.5fr);
         gap: 12px;
-        align-items: start;
+        align-items: center;
       }
 
       .custom-select {
@@ -623,6 +624,14 @@
         white-space: nowrap;
       }
 
+      .select-option-usage-wrap {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 7px;
+        min-width: 0;
+      }
+
       .status-dot {
         width: 9px;
         height: 9px;
@@ -637,6 +646,22 @@
 
       .status-dot.stopped {
         background: var(--red);
+      }
+
+      .history-range-total {
+        min-width: 0;
+        min-height: 42px;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        overflow: hidden;
+        color: var(--text);
+        font-size: 24px;
+        font-weight: 800;
+        line-height: 1;
+        text-align: right;
+        white-space: nowrap;
+        text-overflow: ellipsis;
       }
 
       .history-chart-shell {
@@ -807,14 +832,14 @@
             </div>
           </div>
           <div class="feature-body">
+            <button id="openConfigBtn" class="config-button" type="button">
+              插件基础配置 ...
+            </button>
             <button id="openStrategyBtn" class="strategy-button" type="button">
               用量超限策略配置
             </button>
             <button id="openHistoryBtn" class="strategy-button" type="button">
               历史 token 用量统计
-            </button>
-            <button id="openConfigBtn" class="config-button" type="button">
-              插件基础配置 ...
             </button>
             <div id="statusLine" class="status-line"></div>
           </div>
@@ -882,6 +907,11 @@
               </button>
               <div id="rangeSelectMenu" class="select-menu"></div>
             </div>
+            <div
+              id="historyRangeTotal"
+              class="history-range-total"
+              aria-live="polite"
+            ></div>
           </div>
           <div class="history-chart-shell">
             <div id="historyYAxis" class="history-y-axis"></div>
@@ -933,6 +963,8 @@
           selectedGroupId: "",
           range: "24h",
           bars: [],
+          rangeTotalDisplay: "",
+          rangeTotalTokens: 0,
           syncedAt: "",
         },
       };
@@ -956,6 +988,7 @@
       const rangeSelectTrigger = document.getElementById("rangeSelectTrigger");
       const rangeSelectLabel = document.getElementById("rangeSelectLabel");
       const rangeSelectMenu = document.getElementById("rangeSelectMenu");
+      const historyRangeTotal = document.getElementById("historyRangeTotal");
       const historyYAxis = document.getElementById("historyYAxis");
       const historyChart = document.getElementById("historyChart");
       const historyXAxis = document.getElementById("historyXAxis");
@@ -963,6 +996,7 @@
       const remarkInput = document.getElementById("remarkInput");
       const remarkTarget = document.getElementById("remarkTarget");
       const remarkToast = document.getElementById("remarkToast");
+      let historyResizeFrame = 0;
 
       function setToast(message, isError = false) {
         toast.textContent = message || "";
@@ -1302,6 +1336,9 @@
         historyXAxis.innerHTML = "";
         historyYAxis.innerHTML = "";
         historyFooter.textContent = "";
+        state.history.rangeTotalTokens = 0;
+        state.history.rangeTotalDisplay = "";
+        renderHistoryTotal();
         try {
           await loadHistory();
         } catch (error) {
@@ -1337,9 +1374,6 @@
           }`;
           option.type = "button";
 
-          const dot = document.createElement("span");
-          dot.className = statusDotClass(group.status);
-
           const content = document.createElement("span");
           content.className = "select-option-main";
 
@@ -1347,12 +1381,19 @@
           id.className = "select-option-id";
           id.textContent = `${group.group_id}${group.remark ? `（${group.remark}）` : ""}`;
 
+          const usageWrap = document.createElement("span");
+          usageWrap.className = "select-option-usage-wrap";
+
+          const dot = document.createElement("span");
+          dot.className = statusDotClass(group.status);
+
           const usage = document.createElement("span");
           usage.className = "select-option-usage";
           usage.textContent = group.daily_display || "0";
 
-          content.append(id, usage);
-          option.append(dot, content);
+          usageWrap.append(dot, usage);
+          content.append(id, usageWrap);
+          option.append(content);
           option.addEventListener("click", async () => {
             state.history.selectedGroupId = group.group_id;
             closeCustomSelects();
@@ -1378,8 +1419,97 @@
         });
       }
 
+      function renderHistoryTotal() {
+        const totalText =
+          state.history.selectedGroupId && state.history.rangeTotalDisplay
+            ? state.history.rangeTotalDisplay
+            : "";
+        historyRangeTotal.textContent = totalText;
+        historyRangeTotal.title = totalText
+          ? `${historyRangeLabel(state.history.range)} token 用量总和：${totalText}`
+          : "";
+      }
+
+      function formatHistoryTokenNumber(value, decimals = 2) {
+        const tokens = Math.max(0, Math.round(Number(value || 0)));
+        if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(decimals)} M`;
+        if (tokens >= 1000) return `${(tokens / 1000).toFixed(decimals)} K`;
+        return String(tokens);
+      }
+
+      function historyHourRangeLabel(startLabel, endLabel) {
+        if (!startLabel || startLabel === endLabel) return startLabel || "";
+        const startHour = String(startLabel).split(":")[0];
+        const endHour = String(endLabel).split(":")[0];
+        return `${startHour}-${endHour}`;
+      }
+
+      function aggregateHistoryBars(bars, bucketSize) {
+        const step = Math.max(1, Number(bucketSize || 1));
+        if (step === 1) return bars;
+        const result = [];
+        for (let index = 0; index < bars.length; index += step) {
+          const chunk = bars.slice(index, index + step);
+          const tokens = chunk.reduce((sum, bar) => sum + Number(bar.tokens || 0), 0);
+          const first = chunk[0] || {};
+          const last = chunk[chunk.length - 1] || first;
+          result.push({
+            label: historyHourRangeLabel(first.label, last.label),
+            tokens,
+            display: formatHistoryTokenNumber(tokens, 1),
+            bucket: first.bucket || "",
+            group_id: first.group_id || "",
+          });
+        }
+        return result;
+      }
+
+      function historyChartInnerWidth() {
+        const style = window.getComputedStyle(historyChart);
+        const padding =
+          Number.parseFloat(style.paddingLeft || "0") +
+          Number.parseFloat(style.paddingRight || "0");
+        return Math.max(0, (historyChart.clientWidth || 0) - padding);
+      }
+
+      function estimateHistoryValueWidth(bars) {
+        const sample = document.createElement("span");
+        sample.className = "history-bar-value";
+        sample.style.position = "fixed";
+        sample.style.visibility = "hidden";
+        sample.style.pointerEvents = "none";
+        document.body.append(sample);
+        let maxWidth = 0;
+        bars.forEach((bar) => {
+          sample.textContent = bar.display || formatHistoryTokenNumber(bar.tokens || 0, 1);
+          maxWidth = Math.max(maxWidth, sample.getBoundingClientRect().width);
+        });
+        sample.remove();
+        return maxWidth + 4;
+      }
+
+      function fitsHistoryBars(bars, availableWidth) {
+        if (!bars.length) return true;
+        const gapWidth = Math.max(0, (bars.length - 1) * 8);
+        const slotWidth = (Math.max(0, availableWidth - gapWidth) / bars.length);
+        return slotWidth >= estimateHistoryValueWidth(bars);
+      }
+
+      function resolveHistoryBarsForViewport(bars) {
+        if (state.history.range !== "24h" || !state.history.selectedGroupId) {
+          return bars;
+        }
+        const availableWidth = historyChartInnerWidth();
+        if (!availableWidth) return aggregateHistoryBars(bars, 4);
+        const twoHourBars = aggregateHistoryBars(bars, 2);
+        if (fitsHistoryBars(twoHourBars, availableWidth)) return twoHourBars;
+        const threeHourBars = aggregateHistoryBars(bars, 3);
+        if (fitsHistoryBars(threeHourBars, availableWidth)) return threeHourBars;
+        return aggregateHistoryBars(bars, 4);
+      }
+
       function renderHistoryChart() {
-        const bars = state.history.bars || [];
+        const bars = resolveHistoryBarsForViewport(state.history.bars || []);
         historyChart.innerHTML = "";
         historyXAxis.innerHTML = "";
         historyYAxis.innerHTML = "";
@@ -1456,8 +1586,11 @@
         state.history.selectedGroupId = payload.selected_group_id || "";
         state.history.range = payload.range || state.history.range || "24h";
         state.history.bars = payload.bars || [];
+        state.history.rangeTotalTokens = Number(payload.range_total_tokens || 0);
+        state.history.rangeTotalDisplay = payload.range_total_display || "";
         state.history.syncedAt = payload.synced_at || "";
         renderHistoryControls();
+        renderHistoryTotal();
         renderHistoryChart();
       }
 
@@ -1506,6 +1639,14 @@
       }
 
       async function openHistory() {
+        state.history.selectedGroupId = "";
+        state.history.range = "24h";
+        state.history.bars = [];
+        state.history.rangeTotalTokens = 0;
+        state.history.rangeTotalDisplay = "";
+        state.history.syncedAt = "";
+        renderHistoryControls();
+        renderHistoryTotal();
         historyOverlay.classList.add("open");
         await reloadHistory();
       }
@@ -1513,6 +1654,21 @@
       function closeHistory() {
         historyOverlay.classList.remove("open");
         closeCustomSelects();
+      }
+
+      function handleHistoryResize() {
+        if (
+          historyResizeFrame ||
+          !historyOverlay.classList.contains("open") ||
+          state.history.range !== "24h" ||
+          !state.history.selectedGroupId
+        ) {
+          return;
+        }
+        historyResizeFrame = window.requestAnimationFrame(() => {
+          historyResizeFrame = 0;
+          renderHistoryChart();
+        });
       }
 
       function openRemark(groupId, remark) {
@@ -1607,6 +1763,7 @@
       document.addEventListener("click", () => {
         closeCustomSelects();
       });
+      window.addEventListener("resize", handleHistoryResize);
       overlay.addEventListener("click", (event) => {
         if (event.target === overlay) closeConfig();
       });
