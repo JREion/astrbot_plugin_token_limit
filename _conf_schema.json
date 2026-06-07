@@ -14,7 +14,7 @@
   "daily_token_limit": {
     "description": "单个群聊每日用量上限",
     "type": "int",
-    "hint": "单位为 token。到达上限后，根据“用量超限时的措施”停止调用 LLM 或切换到回退模型。",
+    "hint": "单位为 token。当前统计窗口内群聊总用量到达上限后，根据“用量超限时的措施”停止调用 LLM 或切换到回退模型。",
     "default": 1000000
   },
   "over_limit_policy": {
@@ -44,7 +44,7 @@
       "fallback_token_limit": {
         "description": "回退模型的用量上限",
         "type": "int",
-        "hint": "单位为 token。原始模型超限后，群聊通过回退模型额外可消耗的 token 上限；设置为 0 时不允许继续回退调用。",
+        "hint": "单位为 token。选择回退时，硬上限为“每日用量上限 + 回退模型的用量上限”；当前统计窗口内群聊总用量到达硬上限后停止调用。",
         "default": 0
       }
     }

@@ -52,7 +52,7 @@ CONFIG_SCHEMA: dict[str, dict[str, Any]] = {
     "daily_token_limit": {
         "description": "单个群聊每日用量上限",
         "type": "int",
-        "hint": "单位为 token。到达上限后，根据“用量超限时的措施”停止调用 LLM 或切换到回退模型。",
+        "hint": "单位为 token。当前统计窗口内群聊总用量到达上限后，根据“用量超限时的措施”停止调用 LLM 或切换到回退模型。",
         "default": 1000000,
     },
     "over_limit_policy": {
@@ -82,7 +82,7 @@ CONFIG_SCHEMA: dict[str, dict[str, Any]] = {
             "fallback_token_limit": {
                 "description": "回退模型的用量上限",
                 "type": "int",
-                "hint": "单位为 token。原始模型超限后，群聊通过回退模型额外可消耗的 token 上限；设置为 0 时不允许继续回退调用。",
+                "hint": "单位为 token。选择回退时，硬上限为“每日用量上限 + 回退模型的用量上限”；当前统计窗口内群聊总用量到达硬上限后停止调用。",
                 "default": 0,
             },
         },
@@ -453,6 +453,132 @@ class Main(Star):
                 hourly[key] = hourly.get(key, 0) + int(tokens or 0)
         return total, hourly
 
+    async def _query_split_usage_for_group(
+        self,
+        group_id: str,
+        window: UsageWindow,
+        fallback_provider_id: str,
+    ) -> tuple[int, int, dict[str, int]]:
+        if not fallback_provider_id:
+            primary_used, hourly = await self._query_usage_for_group(group_id, window)
+            return primary_used, 0, hourly
+
+        primary_used, hourly = await self._query_usage_for_group(
+            group_id,
+            window,
+            exclude_provider_id=fallback_provider_id,
+        )
+        fallback_used, _ = await self._query_usage_for_group(
+            group_id,
+            window,
+            provider_id=fallback_provider_id,
+        )
+        return primary_used, fallback_used, hourly
+
+    @staticmethod
+    def _build_limit_state(
+        limit: int,
+        policy: dict[str, Any],
+        primary_used: int,
+        fallback_used: int,
+        fallback_configured: bool,
+    ) -> dict[str, Any]:
+        used = primary_used + fallback_used
+        action = str(policy.get("action") or OVER_LIMIT_STOP)
+        fallback_token_limit = max(0, int(policy.get("fallback_token_limit") or 0))
+        hard_limit = limit
+        effective_limit = limit
+        using_fallback = False
+        stopped = False
+        status = "normal"
+
+        if limit > 0:
+            if action == OVER_LIMIT_FALLBACK and fallback_configured:
+                hard_limit = limit + fallback_token_limit
+                if used >= limit:
+                    effective_limit = hard_limit
+                    if used >= hard_limit:
+                        stopped = True
+                        status = "stopped"
+                    else:
+                        using_fallback = True
+                        status = "fallback"
+            elif used >= limit:
+                stopped = True
+                status = "stopped"
+
+        percent = (
+            0
+            if effective_limit <= 0
+            else min(100, round((used / effective_limit) * 100, 2))
+        )
+        return {
+            "used": used,
+            "hard_limit": hard_limit,
+            "effective_limit": effective_limit,
+            "percent": percent,
+            "using_fallback": using_fallback,
+            "stopped": stopped,
+            "status": status,
+        }
+
+    async def _build_event_limit_context(
+        self,
+        event: AstrMessageEvent,
+    ) -> dict[str, Any] | None:
+        if not self._is_enabled():
+            return None
+        if not self._is_qq_group_event(event):
+            return None
+
+        group_id = _normalize_group_id(event.get_group_id())
+        if not group_id or group_id not in self._limited_groups():
+            return None
+
+        limit = self._daily_limit()
+        if limit <= 0:
+            return None
+
+        window = _build_usage_window(self._config_value("refresh_time"))
+        policy = self._over_limit_policy()
+        fallback_provider_id = (
+            str(policy["fallback_provider_id"])
+            if policy["action"] == OVER_LIMIT_FALLBACK
+            else ""
+        )
+        fallback_token_limit = int(policy["fallback_token_limit"])
+        fallback_configured = bool(
+            policy["action"] == OVER_LIMIT_FALLBACK and fallback_token_limit > 0
+        )
+        fallback_provider_valid = bool(
+            fallback_provider_id and self._fallback_provider_exists(fallback_provider_id)
+        )
+        primary_used, fallback_used, _ = await self._query_split_usage_for_group(
+            group_id,
+            window,
+            fallback_provider_id,
+        )
+        limit_state = self._build_limit_state(
+            limit,
+            policy,
+            primary_used,
+            fallback_used,
+            fallback_configured,
+        )
+        return {
+            "group_id": group_id,
+            "limit": limit,
+            "window": window,
+            "policy": policy,
+            "fallback_provider_id": fallback_provider_id,
+            "fallback_token_limit": fallback_token_limit,
+            "fallback_configured": fallback_configured,
+            "fallback_provider_valid": fallback_provider_valid,
+            "primary_used": primary_used,
+            "fallback_used": fallback_used,
+            "limit_state": limit_state,
+        }
+
     async def _build_usage_payload(self) -> dict[str, Any]:
         groups = self._limited_groups()
         limit = self._daily_limit()
@@ -463,53 +589,31 @@ class Main(Star):
             else ""
         )
         fallback_token_limit = int(policy["fallback_token_limit"])
+        fallback_configured = bool(
+            policy["action"] == OVER_LIMIT_FALLBACK and fallback_token_limit > 0
+        )
         fallback_enabled = bool(
-            fallback_provider_id
-            and fallback_token_limit > 0
-            and self._fallback_provider_exists(fallback_provider_id)
+            fallback_provider_id and self._fallback_provider_exists(fallback_provider_id)
         )
         window = _build_usage_window(self._config_value("refresh_time"))
         remarks = self._load_group_remarks()
         items = []
         for group_id in groups:
-            if fallback_provider_id:
-                primary_used, hourly = await self._query_usage_for_group(
-                    group_id,
-                    window,
-                    exclude_provider_id=fallback_provider_id,
-                )
-                fallback_used, _ = await self._query_usage_for_group(
-                    group_id,
-                    window,
-                    provider_id=fallback_provider_id,
-                )
-            else:
-                primary_used, hourly = await self._query_usage_for_group(
-                    group_id,
-                    window,
-                )
-                fallback_used = 0
-
-            used = primary_used + fallback_used
-            using_fallback = bool(
-                fallback_enabled
-                and limit > 0
-                and primary_used >= limit
-                and fallback_used < fallback_token_limit
+            primary_used, fallback_used, hourly = await self._query_split_usage_for_group(
+                group_id,
+                window,
+                fallback_provider_id,
             )
-            has_fallback_window = bool(
-                fallback_enabled and limit > 0 and primary_used >= limit
+            limit_state = self._build_limit_state(
+                limit,
+                policy,
+                primary_used,
+                fallback_used,
+                fallback_configured,
             )
-            effective_limit = (
-                limit + fallback_token_limit
-                if has_fallback_window
-                else limit
-            )
-            percent = (
-                0
-                if effective_limit <= 0
-                else min(100, round((used / effective_limit) * 100, 2))
-            )
+            used = int(limit_state["used"])
+            effective_limit = int(limit_state["effective_limit"])
+            hard_limit = int(limit_state["hard_limit"])
             items.append(
                 {
                     "group_id": group_id,
@@ -518,15 +622,24 @@ class Main(Star):
                     "primary_used_tokens": primary_used,
                     "fallback_used_tokens": fallback_used,
                     "limit_tokens": effective_limit,
+                    "hard_limit_tokens": hard_limit,
                     "primary_limit_tokens": limit,
                     "fallback_limit_tokens": fallback_token_limit,
                     "used_display": _format_tokens(used),
                     "limit_display": _format_tokens(effective_limit),
+                    "hard_limit_display": _format_tokens(hard_limit),
                     "primary_limit_display": _format_tokens(limit),
                     "fallback_limit_display": _format_tokens(fallback_token_limit),
-                    "percent": percent,
-                    "limited": bool(effective_limit and used >= effective_limit),
-                    "using_fallback": using_fallback,
+                    "percent": limit_state["percent"],
+                    "limited": bool(limit_state["stopped"]),
+                    "using_fallback": bool(
+                        limit_state["using_fallback"] and fallback_enabled
+                    ),
+                    "fallback_unavailable": bool(
+                        limit_state["using_fallback"] and not fallback_enabled
+                    ),
+                    "stopped": bool(limit_state["stopped"]),
+                    "status": limit_state["status"],
                     "fallback_provider_id": fallback_provider_id,
                     "hourly": hourly,
                 }
@@ -538,6 +651,7 @@ class Main(Star):
             "remarks": remarks,
             "over_limit_policy": {
                 **policy,
+                "fallback_configured": fallback_configured,
                 "fallback_enabled": fallback_enabled,
             },
             "window": {
@@ -741,70 +855,81 @@ class Main(Star):
 
         return _ok({"group_id": group_id, "remark": remark, "remarks": remarks})
 
+    @filter.on_waiting_llm_request(priority=1000)
+    async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
+        limit_context = await self._build_event_limit_context(event)
+        if not limit_context:
+            return
+
+        limit_state = limit_context["limit_state"]
+        if limit_state["status"] != "fallback":
+            return
+
+        fallback_provider_id = str(limit_context["fallback_provider_id"] or "")
+        if not limit_context["fallback_provider_valid"]:
+            logger.warning(
+                "群 %s 当前窗口 token=%s 已进入回退区间，但回退模型供应商 %s 不可用；本次将交由 AstrBot 使用当前可用供应商。",
+                limit_context["group_id"],
+                limit_state["used"],
+                fallback_provider_id or "<empty>",
+            )
+            return
+
+        event.set_extra("selected_provider", fallback_provider_id)
+        event.set_extra("token_limit_selected_provider", fallback_provider_id)
+        logger.info(
+            "群 %s 当前窗口 token=%s 已达每日上限 %s，未达硬上限 %s，本次预先切换到回退模型供应商 %s。",
+            limit_context["group_id"],
+            limit_state["used"],
+            limit_context["limit"],
+            limit_state["hard_limit"],
+            fallback_provider_id,
+        )
+
     @filter.on_llm_request(priority=1000)
     async def on_llm_request(
         self,
         event: AstrMessageEvent,
         req: ProviderRequest,
     ) -> None:
-        if not self._is_enabled():
-            return
-        if not self._is_qq_group_event(event):
-            return
-
-        group_id = _normalize_group_id(event.get_group_id())
-        if not group_id or group_id not in self._limited_groups():
+        limit_context = await self._build_event_limit_context(event)
+        if not limit_context:
             return
 
-        limit = self._daily_limit()
-        if limit <= 0:
+        group_id = limit_context["group_id"]
+        limit = int(limit_context["limit"])
+        window = limit_context["window"]
+        limit_state = limit_context["limit_state"]
+        used = int(limit_state["used"])
+        stop_limit = int(limit_state["hard_limit"])
+
+        if limit_state["status"] == "normal":
             return
 
-        window = _build_usage_window(self._config_value("refresh_time"))
-        policy = self._over_limit_policy()
-        fallback_provider_id = (
-            str(policy["fallback_provider_id"])
-            if policy["action"] == OVER_LIMIT_FALLBACK
-            else ""
-        )
-        if fallback_provider_id:
-            primary_used, _ = await self._query_usage_for_group(
-                group_id,
-                window,
-                exclude_provider_id=fallback_provider_id,
-            )
-        else:
-            primary_used, _ = await self._query_usage_for_group(group_id, window)
+        if limit_state["status"] == "fallback":
+            fallback_provider_id = str(limit_context["fallback_provider_id"] or "")
+            if limit_context["fallback_provider_valid"]:
+                event.set_extra("selected_provider", fallback_provider_id)
 
-        if primary_used < limit:
-            return
-
-        used = primary_used
-        stop_limit = limit
-        if policy["action"] == OVER_LIMIT_FALLBACK:
-            fallback_limit = int(policy["fallback_token_limit"])
-            if (
-                fallback_provider_id
-                and fallback_limit > 0
-                and self._fallback_provider_exists(fallback_provider_id)
-            ):
-                fallback_used, _ = await self._query_usage_for_group(
+            selected_provider = event.get_extra("token_limit_selected_provider")
+            if selected_provider:
+                logger.debug(
+                    "群 %s 已预先切换到回退模型供应商 %s。",
                     group_id,
-                    window,
-                    provider_id=fallback_provider_id,
+                    selected_provider,
                 )
-                if fallback_used < fallback_limit:
-                    event.set_extra("selected_provider", fallback_provider_id)
-                    logger.info(
-                        "群 %s 原始模型 token=%s 已达上限 %s，本次切换到回退模型供应商 %s。",
-                        group_id,
-                        primary_used,
-                        limit,
-                        fallback_provider_id,
-                    )
-                    return
-                used = primary_used + fallback_used
-                stop_limit = limit + fallback_limit
+            elif limit_context["fallback_provider_valid"]:
+                logger.warning(
+                    "群 %s 已进入回退区间，但 provider 已在 LLM 请求钩子前完成选择；请确认 on_waiting_llm_request 钩子已启用。",
+                    group_id,
+                )
+            else:
+                logger.warning(
+                    "群 %s 已进入回退区间，但回退模型供应商 %s 不可用；本次交由 AstrBot 当前可用供应商处理。",
+                    group_id,
+                    limit_context["fallback_provider_id"] or "<empty>",
+                )
+            return
 
         if bool(self._config_value("send_block_message")):
             message_template = str(self._config_value("block_message") or "")

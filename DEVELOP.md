@@ -2,6 +2,36 @@
 
 本文档记录每个版本对插件结构、配置、页面和运行逻辑的变动。
 
+## 0.3.1 - 2026-06-07
+
+修复回退策略下配置变更后硬上限失效的问题。
+
+- `metadata.yaml`
+  - 版本号更新为 `0.3.1`。
+- `_conf_schema.json`
+  - 更新 `daily_token_limit` 和 `fallback_token_limit` 提示，明确当前统计窗口内总用量与硬上限规则。
+- `main.py`
+  - 新增 `_query_split_usage_for_group()`，集中拆分原始供应商用量和回退供应商用量。
+  - 新增 `_build_limit_state()`，统一计算 `normal`、`fallback`、`stopped` 三种状态。
+  - 新增 `_build_event_limit_context()`，让等待 LLM 阶段和 LLM 请求阶段共用同一套限流上下文。
+  - 新增 `on_waiting_llm_request()`，在 AstrBot 选择 provider 和构建 agent 之前写入 `selected_provider`，修复回退区间仍使用原始模型的问题。
+  - 修复请求判断口径：
+    - `used < daily_token_limit` 时使用原始模型。
+    - 选择回退策略时，`daily_token_limit <= used < daily_token_limit + fallback_token_limit` 进入回退区间。
+    - 回退供应商有效时强制使用回退供应商；回退供应商失效时交由 AstrBot 使用当前可用供应商。
+    - `used >= hard_limit` 时必须阻止该群所有 LLM 调用。
+    - 选择停止调用策略时，`used >= daily_token_limit` 必须阻止该群所有 LLM 调用。
+  - `on_llm_request()` 保留硬上限兜底拦截，不再承担 provider 选择职责，因为该钩子触发时 AstrBot 已完成 provider 选择。
+  - `_build_usage_payload()` 改为使用同一套状态计算逻辑，返回 `stopped`、`status`、`hard_limit_tokens`、`hard_limit_display`。
+  - 硬上限随当前配置实时变化，用户调低上限后下一次请求立即生效。
+- `pages/dashboard/index.html`
+  - 新增 `.stop-tag`、`.usage-value.stopped`、`.progress-fill.stopped`。
+  - 用量统计中达到硬上限时显示红色“停止响应”标签。
+  - 达到硬上限时 token 用量值字体变红，进度条变红。
+  - 红色停止状态优先于黄色回退状态。
+- `STRUCTURE.md`
+  - 更新到 v0.3.1，补全硬上限规则、三态状态机、页面红色状态映射和新增函数职责。
+
 ## 0.3.0 - 2026-06-07
 
 新增“用量超限时的措施”能力。
@@ -84,3 +114,4 @@
 - 不拦截无需调用 LLM 的插件命令或普通消息。
 - 配置保存始终写回 AstrBot 注入的插件 `AstrBotConfig` 对象。
 - 群备注是插件页面辅助数据，不属于限流配置，独立保存在插件数据目录。
+- LLM 请求钩子与 Plugin Page 用量状态必须共用同一套限流状态计算规则。

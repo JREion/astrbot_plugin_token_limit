@@ -52,7 +52,7 @@
 - `over_limit_policy.action = fallback_provider`
 - `over_limit_policy.fallback_token_limit = 5000000`
 
-某群当日原始模型用量达到 10M token 后，后续 LLM 请求会切换到配置的回退供应商。该群通过回退供应商继续消耗 5M token 后，当日总用量达到 15M，插件会停止该群继续调用任何 LLM 模型。
+某群当日总用量小于 10M token 时使用原始模型；当日总用量大于等于 10M 且小于 15M token 时，后续 LLM 请求会切换到配置的回退供应商；当日总用量达到 15M token 后，插件会停止该群继续调用任何 LLM 模型。
 
 其他未超限群聊不会被切换，仍使用 AstrBot 默认模型供应商。
 
@@ -62,4 +62,3 @@
 2. 在 AstrBot WebUI 的插件管理中加载或重载插件。
 3. 在原生 WebUI 插件配置页或 Plugin Page 的弹窗中填写群号、每日上限、刷新时间和超限策略。
 4. 打开 Plugin Page 查看限流群当前窗口内的用量进度。
-

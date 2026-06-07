@@ -1,6 +1,6 @@
 # STRUCTURE
 
-本文档记录 v0.3.0 版本的插件结构、内部 API、页面元素映射和主要函数职责。
+本文档记录 v0.3.1 版本的插件结构、内部 API、页面元素映射和主要函数职责。
 
 ## 文件结构
 
@@ -36,7 +36,7 @@ astrbot_plugin_token_limit/
 
 - `name`：插件名称，当前为 `astrbot_plugin_token_limit`。
 - `description` / `short_desc`：插件描述。
-- `version`：当前版本 `0.3.0`。
+- `version`：当前版本 `0.3.1`。
 - `support_platforms`：默认支持 `aiocqhttp`、`qq_official`、`qq_official_webhook`。
 - `astrbot_version`：最低 AstrBot 版本要求。
 - `pages`：声明 `dashboard` Plugin Page，页面文件位于 `pages/dashboard/index.html`。
@@ -47,11 +47,11 @@ astrbot_plugin_token_limit/
 
 - `enabled`：插件总开关。
 - `limited_groups`：限流 QQ 群号列表。
-- `daily_token_limit`：单群每日原始模型 token 上限。
+- `daily_token_limit`：单群当前统计窗口内总 token 的每日基础上限。
 - `over_limit_policy`：用量超限时的措施配置集合。
   - `action`：`stop_llm` 或 `fallback_provider`。
   - `fallback_provider_id`：回退模型供应商 ID。
-  - `fallback_token_limit`：回退模型额外 token 上限。
+  - `fallback_token_limit`：回退模型额外 token 上限。选择回退策略时，硬上限为 `daily_token_limit + fallback_token_limit`。
 - `refresh_time`：每日统计窗口刷新时间。
 - `qq_platform_names`：QQ 平台适配器名称白名单。
 - `match_unique_session`：是否兼容 `unique_session` 形式的 `umo`。
@@ -125,9 +125,9 @@ astrbot_plugin_token_limit/
 - `_umo_candidates_for_group(group_id)`：构造标准 `umo` 候选值。
 - `_unique_session_like_patterns(group_id)`：构造兼容 `unique_session` 的 `LIKE` 匹配规则。
 
-### 用量与回退策略函数
+### 用量与硬上限函数
 
-- `_daily_limit()`：读取每日原始模型 token 上限。
+- `_daily_limit()`：读取每日基础 token 上限。
 - `_over_limit_policy()`：读取并合并超限策略默认值。
 - `_fallback_provider_id()`：当策略为回退时返回供应商 ID。
 - `_fallback_token_limit()`：读取回退模型 token 上限。
@@ -136,13 +136,26 @@ astrbot_plugin_token_limit/
 - `_config_schema_for_page()`：深拷贝 `CONFIG_SCHEMA`，并给 `over_limit_policy.fallback_provider_id` 注入运行时供应商 `options` 和 `option_labels`。
 - `_query_usage_for_group(group_id, window, provider_id=None, exclude_provider_id=None)`：
   - 查询 `ProviderStat`。
-  - 可指定只统计某供应商，也可排除某供应商。
+  - 可指定只统计某供应商，也可排除某个供应商。
   - 返回窗口总 token 和小时桶统计。
+- `_query_split_usage_for_group(group_id, window, fallback_provider_id)`：
+  - 当配置了回退供应商时，返回排除回退供应商的 `primary_used`、回退供应商的 `fallback_used`、以及页面使用的小时桶。
+  - 未配置回退供应商时，全部窗口用量归入 `primary_used`。
+- `_build_limit_state(limit, policy, primary_used, fallback_used, fallback_configured)`：
+  - 用同一套规则给页面统计和 LLM 请求钩子计算状态。
+  - `used = primary_used + fallback_used`。
+  - `stop_llm` 策略：`used < limit` 为 `normal`，`used >= limit` 为 `stopped`。
+  - `fallback_provider` 策略且配置了正数回退额度：`used < limit` 为 `normal`，`limit <= used < limit + fallback_token_limit` 为 `fallback`，`used >= limit + fallback_token_limit` 为 `stopped`。
+  - 回退供应商是否可用不改变硬上限状态，只决定能否强制指定该供应商。
+  - 返回 `used`、`hard_limit`、`effective_limit`、`percent`、`using_fallback`、`stopped`、`status`。
+- `_build_event_limit_context(event)`：
+  - 复用同一套事件过滤、用量查询和状态计算逻辑。
+  - 返回群号、窗口、策略、回退供应商、回退供应商有效性、拆分用量和 `limit_state`。
 - `_build_usage_payload()`：
   - 生成 Plugin Page 用量响应。
-  - 启用回退策略时拆分原始模型用量和回退模型用量。
-  - 当原始模型用量达到每日上限且仍有回退额度时，标记 `using_fallback=true`。
-  - 一旦进入回退窗口，页面总上限使用 `daily_token_limit + fallback_token_limit`。
+  - 拆分原始模型用量和回退模型用量。
+  - 按当前配置实时计算硬上限，配置变更后立即影响页面状态。
+  - 返回 `using_fallback`、`stopped`、`status`、`hard_limit_tokens` 等字段。
 
 ### Web API 函数
 
@@ -154,7 +167,7 @@ astrbot_plugin_token_limit/
   - 调用 `_sanitize_config()` 后更新 AstrBot 插件配置。
   - 如配置对象支持 `save_config()`，立即持久化。
 - `api_get_usage()`
-  - 返回当前窗口内所有限流群的用量、备注、窗口和超限策略状态。
+  - 返回当前窗口内所有限流群的用量、备注、窗口、回退状态和停止状态。
 - `api_get_providers()`
   - 返回当前可用于回退的聊天模型供应商列表。
 - `api_get_remarks()`
@@ -165,16 +178,16 @@ astrbot_plugin_token_limit/
 
 ### LLM 请求钩子
 
-- `on_llm_request(event, req)`
+- `on_waiting_llm_request(event)`
   - 非启用、非 QQ 群、非限流群、上限小于等于 0 时直接返回。
-  - 查询当前群原始模型用量。
-  - 原始模型用量未达到 `daily_token_limit` 时直接返回。
-  - 策略为 `fallback_provider` 且回退供应商有效、回退额度未耗尽时：
-    - 调用 `event.set_extra("selected_provider", fallback_provider_id)`。
-    - 放行本次请求，由 AstrBot 使用回退供应商生成回复。
-  - 策略为 `stop_llm`，或回退供应商无效，或回退额度已耗尽时：
-    - 按配置发送 `block_message`。
-    - 调用 `event.stop_event()` 阻止本次 LLM 请求。
+  - 发生在 AstrBot 选择 provider 和构建 agent 之前。
+  - 当 `status == fallback` 且回退供应商有效时，写入 `event.set_extra("selected_provider", fallback_provider_id)`。
+  - 当 `status == fallback` 但回退供应商失效时，不写入 `selected_provider`，交由 AstrBot 使用当前可用供应商。
+- `on_llm_request(event, req)`
+  - 发生在 AstrBot 选择 provider 和构建 agent 之后。
+  - 复用 `_build_event_limit_context()` 做兜底判断。
+  - `normal` 和 `fallback`：放行；回退供应商的提前选择已经在 `on_waiting_llm_request()` 完成。
+  - `stopped`：按配置发送 `block_message`，并调用 `event.stop_event()` 阻止本次 LLM 请求。
 
 ## Web API
 
@@ -184,7 +197,7 @@ Plugin Page 通过 `window.AstrBotPluginPage` bridge 调用，实际路径由 As
 | --- | --- | --- |
 | `GET` | `config` | 获取当前配置和动态 schema。 |
 | `POST` | `config` | 保存插件配置。 |
-| `GET` | `usage` | 获取当前统计窗口、群用量和回退状态。 |
+| `GET` | `usage` | 获取当前统计窗口、群用量、回退状态和停止状态。 |
 | `GET` | `providers` | 获取可选回退供应商列表。 |
 | `GET` | `remarks` | 获取群备注映射。 |
 | `POST` | `remarks` | 保存或删除群备注。 |
@@ -216,10 +229,15 @@ Plugin Page 通过 `window.AstrBotPluginPage` bridge 调用，实际路径由 As
   - `.group-id`：QQ 群号。
   - `.group-remark`：群备注，以浅灰色括号文本紧跟群号显示。
   - `.icon-button`：备注编辑铅笔按钮。
-  - `.usage-side`：右侧用量值和回退标签容器。
-  - `.fallback-tag`：回退阶段标签。
+  - `.usage-side`：右侧用量值和状态标签容器。
+  - `.fallback-tag`：回退阶段黄色标签“回退模型”。
+  - `.stop-tag`：硬上限停止阶段红色标签“停止响应”。
   - `.usage-value`：用量值。
+  - `.usage-value.fallback`：回退阶段黄色用量值。
+  - `.usage-value.stopped`：停止阶段红色用量值。
   - `.progress-track` / `.progress-fill`：进度条。
+  - `.progress-fill.fallback`：回退阶段黄色进度条。
+  - `.progress-fill.stopped`：停止阶段红色进度条。
 - 右侧 `.panel`：插件功能面板。
   - `#openStrategyBtn`：打开“用量超限策略配置”弹窗。
   - `#openConfigBtn`：打开“插件配置”弹窗。
@@ -258,7 +276,7 @@ Plugin Page 通过 `window.AstrBotPluginPage` bridge 调用，实际路径由 As
 - `appendConfigRow(container, key, meta, draft, onChange)`：渲染一行配置项。
 - `renderConfigForm()`：渲染普通插件配置。
 - `renderStrategyForm()`：渲染超限策略配置；只有选择 `fallback_provider` 时才显示回退供应商和回退上限。
-- `renderUsage(payload)`：渲染群用量、备注、回退标签和进度条颜色。
+- `renderUsage(payload)`：渲染群用量、备注、回退标签、停止标签和进度条颜色。
 - `loadConfig()`：读取配置和 schema。
 - `loadUsage()`：读取用量统计。
 - `openConfig()` / `closeConfig()`：打开或关闭普通配置弹窗。
@@ -275,7 +293,8 @@ Plugin Page 通过 `window.AstrBotPluginPage` bridge 调用，实际路径由 As
 - 备注显示在 QQ 群号右侧，以 `（备注）` 形式渲染；铅笔按钮跟在群号或备注右侧。
 - 普通配置弹窗中的 textarea 会把保存值里的 `\n` 字符串转换为真实换行显示。
 - 回退策略弹窗中，未选择“回退到其他模型”时隐藏回退供应商和回退上限。
-- 群聊处于回退阶段时，进度条、用量字体和标签均使用黄色视觉状态。
+- 群聊处于回退阶段时，进度条、用量字体和“回退模型”标签使用黄色视觉状态。
+- 群聊达到硬上限时，进度条、用量字体和“停止响应”标签使用红色视觉状态，且红色状态优先于回退状态。
 
 ## 配置同步逻辑
 
@@ -284,3 +303,4 @@ Plugin Page 通过 `window.AstrBotPluginPage` bridge 调用，实际路径由 As
 - 原生 WebUI 保存后，Plugin Page 下一次读取 `config` endpoint 会看到新值。
 - Plugin Page 保存后，原生 WebUI 刷新插件配置页会看到新值。
 - Plugin Page 的供应商下拉来自运行时 `Context.get_all_providers()`；原生 WebUI 的静态 schema 使用供应商 ID 字段，由后端保存时校验供应商是否存在。
+- 硬上限按当前配置实时计算。用户调低 `daily_token_limit` 或 `fallback_token_limit` 后，下一次页面刷新和下一次 LLM 请求都会按新上限判断。
