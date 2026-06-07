@@ -482,6 +482,264 @@
         padding-top: 14px;
       }
 
+      .history-modal {
+        width: min(1080px, 100%);
+      }
+
+      .history-content {
+        display: grid;
+        gap: 14px;
+        padding-top: 14px;
+      }
+
+      .history-toolbar {
+        display: grid;
+        grid-template-columns: minmax(260px, 1fr) minmax(180px, 0.38fr);
+        gap: 12px;
+        align-items: start;
+      }
+
+      .custom-select {
+        position: relative;
+        min-width: 0;
+      }
+
+      .select-trigger {
+        width: 100%;
+        min-height: 42px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        background: #fff;
+        color: var(--text);
+        padding: 9px 11px;
+        cursor: pointer;
+        transition:
+          background 150ms ease,
+          border-color 150ms ease,
+          color 150ms ease,
+          transform 80ms ease;
+      }
+
+      .select-trigger:hover,
+      .custom-select.open .select-trigger {
+        background: #eef4ff;
+        border-color: #bfd0f2;
+        color: #1d57bb;
+      }
+
+      .select-trigger:active {
+        background: #dde9ff;
+        border-color: #9eb9ee;
+        transform: translateY(1px);
+      }
+
+      .select-label {
+        min-width: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .select-arrow {
+        flex: 0 0 auto;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .select-menu {
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 0;
+        right: 0;
+        z-index: 30;
+        display: none;
+        max-height: 280px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+        box-shadow: 0 14px 34px rgba(11, 18, 32, 0.16);
+      }
+
+      .custom-select.open .select-menu {
+        display: block;
+      }
+
+      .select-option {
+        width: 100%;
+        min-height: 42px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        border: 0;
+        background: #fff;
+        color: var(--text);
+        padding: 10px 12px;
+        cursor: pointer;
+        text-align: left;
+        transition:
+          background 150ms ease,
+          color 150ms ease;
+      }
+
+      .select-option:hover {
+        background: #eef4ff;
+        color: #1d57bb;
+      }
+
+      .select-option:active,
+      .select-option.selected {
+        background: #dde9ff;
+        color: #194fae;
+      }
+
+      .select-option-main {
+        min-width: 0;
+        flex: 1 1 auto;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .select-option-id {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 700;
+      }
+
+      .select-option-usage {
+        color: var(--muted);
+        font-size: 13px;
+        white-space: nowrap;
+      }
+
+      .status-dot {
+        width: 9px;
+        height: 9px;
+        flex: 0 0 auto;
+        border-radius: 999px;
+        background: var(--green);
+      }
+
+      .status-dot.fallback {
+        background: var(--yellow);
+      }
+
+      .status-dot.stopped {
+        background: var(--red);
+      }
+
+      .history-chart-shell {
+        min-height: 360px;
+        display: grid;
+        grid-template-columns: 58px minmax(0, 1fr);
+        grid-template-rows: minmax(270px, 1fr) auto;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px;
+        background: #fff;
+      }
+
+      .history-y-axis {
+        grid-column: 1;
+        grid-row: 1;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        align-items: flex-end;
+        padding: 4px 0 28px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .history-chart {
+        grid-column: 2;
+        grid-row: 1;
+        min-width: 0;
+        min-height: 270px;
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+        overflow: hidden;
+        border-left: 1px solid #edf1f6;
+        border-bottom: 1px solid #dce2ea;
+        padding: 22px 8px 0;
+      }
+
+      .history-bar-item {
+        min-width: 0;
+        height: 100%;
+        flex: 1 1 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 6px;
+      }
+
+      .history-bar-value {
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .history-bar {
+        width: min(32px, 74%);
+        min-height: 2px;
+        border-radius: 6px 6px 0 0;
+        background: var(--blue);
+        transition:
+          height 320ms ease,
+          background 150ms ease;
+      }
+
+      .history-x-axis {
+        grid-column: 2;
+        grid-row: 2;
+        min-width: 0;
+        display: flex;
+        gap: 8px;
+        padding: 0 8px;
+      }
+
+      .history-x-label {
+        min-width: 0;
+        flex: 1 1 0;
+        overflow: hidden;
+        text-align: center;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .history-empty {
+        width: 100%;
+        margin: auto;
+        align-self: center;
+        text-align: center;
+        color: var(--muted);
+      }
+
+      .history-footer {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
       .switch {
         display: inline-flex;
         align-items: center;
@@ -511,12 +769,19 @@
         }
 
         .layout,
-        .config-row {
+        .config-row,
+        .history-toolbar {
           grid-template-columns: 1fr;
         }
 
         .modal {
           max-height: calc(100vh - 28px);
+        }
+
+        .history-chart-shell {
+          min-height: 320px;
+          grid-template-columns: 46px minmax(0, 1fr);
+          padding: 12px;
         }
       }
     </style>
@@ -545,8 +810,11 @@
             <button id="openStrategyBtn" class="strategy-button" type="button">
               用量超限策略配置
             </button>
+            <button id="openHistoryBtn" class="strategy-button" type="button">
+              历史 token 用量统计
+            </button>
             <button id="openConfigBtn" class="config-button" type="button">
-              更多插件配置 ...
+              插件基础配置 ...
             </button>
             <div id="statusLine" class="status-line"></div>
           </div>
@@ -590,6 +858,41 @@
       </section>
     </div>
 
+    <div id="historyOverlay" class="overlay" role="dialog" aria-modal="true">
+      <section class="modal history-modal">
+        <div class="modal-topbar">
+          <div class="modal-title">历史 token 用量统计</div>
+          <div class="modal-actions">
+            <button id="cancelHistoryBtn" class="action-button" type="button">关闭</button>
+          </div>
+        </div>
+        <div class="modal-content history-content">
+          <div class="history-toolbar">
+            <div id="groupSelect" class="custom-select">
+              <button id="groupSelectTrigger" class="select-trigger" type="button">
+                <span id="groupSelectLabel" class="select-label">选择群聊 ...</span>
+                <span class="select-arrow">▼</span>
+              </button>
+              <div id="groupSelectMenu" class="select-menu"></div>
+            </div>
+            <div id="rangeSelect" class="custom-select">
+              <button id="rangeSelectTrigger" class="select-trigger" type="button">
+                <span id="rangeSelectLabel" class="select-label">近 24 小时</span>
+                <span class="select-arrow">▼</span>
+              </button>
+              <div id="rangeSelectMenu" class="select-menu"></div>
+            </div>
+          </div>
+          <div class="history-chart-shell">
+            <div id="historyYAxis" class="history-y-axis"></div>
+            <div id="historyChart" class="history-chart"></div>
+            <div id="historyXAxis" class="history-x-axis"></div>
+          </div>
+          <div id="historyFooter" class="history-footer"></div>
+        </div>
+      </section>
+    </div>
+
     <div id="remarkOverlay" class="overlay compact" role="dialog" aria-modal="true">
       <section class="modal">
         <div class="modal-topbar">
@@ -625,6 +928,13 @@
         strategyDraft: {},
         schema: {},
         currentRemarkGroupId: "",
+        history: {
+          groups: [],
+          selectedGroupId: "",
+          range: "24h",
+          bars: [],
+          syncedAt: "",
+        },
       };
 
       const usageList = document.getElementById("usageList");
@@ -632,11 +942,24 @@
       const statusLine = document.getElementById("statusLine");
       const overlay = document.getElementById("overlay");
       const strategyOverlay = document.getElementById("strategyOverlay");
+      const historyOverlay = document.getElementById("historyOverlay");
       const remarkOverlay = document.getElementById("remarkOverlay");
       const configForm = document.getElementById("configForm");
       const strategyForm = document.getElementById("strategyForm");
       const toast = document.getElementById("toast");
       const strategyToast = document.getElementById("strategyToast");
+      const groupSelect = document.getElementById("groupSelect");
+      const groupSelectTrigger = document.getElementById("groupSelectTrigger");
+      const groupSelectLabel = document.getElementById("groupSelectLabel");
+      const groupSelectMenu = document.getElementById("groupSelectMenu");
+      const rangeSelect = document.getElementById("rangeSelect");
+      const rangeSelectTrigger = document.getElementById("rangeSelectTrigger");
+      const rangeSelectLabel = document.getElementById("rangeSelectLabel");
+      const rangeSelectMenu = document.getElementById("rangeSelectMenu");
+      const historyYAxis = document.getElementById("historyYAxis");
+      const historyChart = document.getElementById("historyChart");
+      const historyXAxis = document.getElementById("historyXAxis");
+      const historyFooter = document.getElementById("historyFooter");
       const remarkInput = document.getElementById("remarkInput");
       const remarkTarget = document.getElementById("remarkTarget");
       const remarkToast = document.getElementById("remarkToast");
@@ -936,6 +1259,208 @@
         });
       }
 
+      const historyRangeOptions = [
+        { value: "24h", label: "近 24 小时" },
+        { value: "7d", label: "近 7 天" },
+        { value: "30d", label: "近一个月" },
+        { value: "all", label: "历史总和" },
+      ];
+
+      function historyRangeLabel(value) {
+        return (
+          historyRangeOptions.find((item) => item.value === value)?.label ||
+          historyRangeOptions[0].label
+        );
+      }
+
+      function closeCustomSelects(except = null) {
+        [groupSelect, rangeSelect].forEach((item) => {
+          if (item && item !== except) item.classList.remove("open");
+        });
+      }
+
+      function toggleCustomSelect(select) {
+        const willOpen = !select.classList.contains("open");
+        closeCustomSelects(select);
+        select.classList.toggle("open", willOpen);
+      }
+
+      function statusDotClass(status) {
+        if (status === "stopped") return "status-dot stopped";
+        if (status === "fallback") return "status-dot fallback";
+        return "status-dot";
+      }
+
+      function selectedHistoryGroup() {
+        return state.history.groups.find(
+          (group) => group.group_id === state.history.selectedGroupId,
+        );
+      }
+
+      async function reloadHistory() {
+        historyChart.innerHTML = '<div class="history-empty">加载中...</div>';
+        historyXAxis.innerHTML = "";
+        historyYAxis.innerHTML = "";
+        historyFooter.textContent = "";
+        try {
+          await loadHistory();
+        } catch (error) {
+          historyChart.innerHTML = `<div class="history-empty">${
+            error.message || error
+          }</div>`;
+        }
+      }
+
+      function renderHistoryControls() {
+        const selectedGroup = selectedHistoryGroup();
+        groupSelectLabel.textContent = selectedGroup
+          ? `${selectedGroup.group_id}${selectedGroup.remark ? `（${selectedGroup.remark}）` : ""}`
+          : "选择群聊 ...";
+        rangeSelectLabel.textContent = historyRangeLabel(state.history.range);
+
+        groupSelectMenu.innerHTML = "";
+        const allOption = document.createElement("button");
+        allOption.className = `select-option${state.history.selectedGroupId ? "" : " selected"}`;
+        allOption.type = "button";
+        allOption.textContent = "选择群聊 ...";
+        allOption.addEventListener("click", async () => {
+          state.history.selectedGroupId = "";
+          closeCustomSelects();
+          await reloadHistory();
+        });
+        groupSelectMenu.append(allOption);
+
+        state.history.groups.forEach((group) => {
+          const option = document.createElement("button");
+          option.className = `select-option${
+            group.group_id === state.history.selectedGroupId ? " selected" : ""
+          }`;
+          option.type = "button";
+
+          const dot = document.createElement("span");
+          dot.className = statusDotClass(group.status);
+
+          const content = document.createElement("span");
+          content.className = "select-option-main";
+
+          const id = document.createElement("span");
+          id.className = "select-option-id";
+          id.textContent = `${group.group_id}${group.remark ? `（${group.remark}）` : ""}`;
+
+          const usage = document.createElement("span");
+          usage.className = "select-option-usage";
+          usage.textContent = group.daily_display || "0";
+
+          content.append(id, usage);
+          option.append(dot, content);
+          option.addEventListener("click", async () => {
+            state.history.selectedGroupId = group.group_id;
+            closeCustomSelects();
+            await reloadHistory();
+          });
+          groupSelectMenu.append(option);
+        });
+
+        rangeSelectMenu.innerHTML = "";
+        historyRangeOptions.forEach((item) => {
+          const option = document.createElement("button");
+          option.className = `select-option${
+            item.value === state.history.range ? " selected" : ""
+          }`;
+          option.type = "button";
+          option.textContent = item.label;
+          option.addEventListener("click", async () => {
+            state.history.range = item.value;
+            closeCustomSelects();
+            await reloadHistory();
+          });
+          rangeSelectMenu.append(option);
+        });
+      }
+
+      function renderHistoryChart() {
+        const bars = state.history.bars || [];
+        historyChart.innerHTML = "";
+        historyXAxis.innerHTML = "";
+        historyYAxis.innerHTML = "";
+
+        if (!bars.length) {
+          historyYAxis.append(document.createElement("span"));
+          const empty = document.createElement("div");
+          empty.className = "history-empty";
+          empty.textContent = "暂无历史 token 用量";
+          historyChart.append(empty);
+          historyFooter.textContent = state.history.syncedAt
+            ? `最后同步：${formatDate(state.history.syncedAt)}`
+            : "";
+          return;
+        }
+
+        const maxValue = Math.max(...bars.map((bar) => Number(bar.tokens || 0)), 1);
+        [maxValue, Math.round(maxValue / 2), 0].forEach((value) => {
+          const label = document.createElement("span");
+          label.textContent = formatTokenNumber(value);
+          historyYAxis.append(label);
+        });
+
+        const labelStep = bars.length > 16 ? Math.ceil(bars.length / 12) : 1;
+        bars.forEach((bar, index) => {
+          const item = document.createElement("div");
+          item.className = "history-bar-item";
+
+          const value = document.createElement("div");
+          value.className = "history-bar-value";
+          value.textContent = bar.display || formatTokenNumber(bar.tokens || 0);
+
+          const column = document.createElement("div");
+          column.className = "history-bar";
+          column.title = `${bar.label}: ${value.textContent}`;
+          column.style.height = "0%";
+
+          item.append(value, column);
+          historyChart.append(item);
+
+          const xLabel = document.createElement("div");
+          xLabel.className = "history-x-label";
+          xLabel.textContent = index % labelStep === 0 ? bar.label : "";
+          xLabel.title = bar.label;
+          historyXAxis.append(xLabel);
+
+          window.requestAnimationFrame(() => {
+            const height = Math.max(2, Math.round((Number(bar.tokens || 0) / maxValue) * 86));
+            column.style.height = `${height}%`;
+          });
+        });
+
+        historyFooter.textContent = state.history.syncedAt
+          ? `最后同步：${formatDate(state.history.syncedAt)}`
+          : "";
+      }
+
+      function formatTokenNumber(value) {
+        const tokens = Math.max(0, Number(value || 0));
+        if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(2)} M`;
+        if (tokens >= 1000) return `${(tokens / 1000).toFixed(2)} K`;
+        return String(Math.round(tokens));
+      }
+
+      async function loadHistory() {
+        const params = {
+          range: state.history.range || "24h",
+        };
+        if (state.history.selectedGroupId) {
+          params.group_id = state.history.selectedGroupId;
+        }
+        const payload = await api.apiGet("history", params);
+        state.history.groups = payload.groups || [];
+        state.history.selectedGroupId = payload.selected_group_id || "";
+        state.history.range = payload.range || state.history.range || "24h";
+        state.history.bars = payload.bars || [];
+        state.history.syncedAt = payload.synced_at || "";
+        renderHistoryControls();
+        renderHistoryChart();
+      }
+
       async function loadConfig() {
         const payload = await api.apiGet("config");
         state.config = payload.config || {};
@@ -978,6 +1503,16 @@
         strategyOverlay.classList.remove("open");
         state.strategyDraft = {};
         setStrategyToast("");
+      }
+
+      async function openHistory() {
+        historyOverlay.classList.add("open");
+        await reloadHistory();
+      }
+
+      function closeHistory() {
+        historyOverlay.classList.remove("open");
+        closeCustomSelects();
       }
 
       function openRemark(groupId, remark) {
@@ -1046,18 +1581,40 @@
 
       document.getElementById("openConfigBtn").addEventListener("click", openConfig);
       document.getElementById("openStrategyBtn").addEventListener("click", openStrategy);
+      document.getElementById("openHistoryBtn").addEventListener("click", openHistory);
       document.getElementById("cancelBtn").addEventListener("click", closeConfig);
       document.getElementById("saveBtn").addEventListener("click", saveConfig);
       document.getElementById("refreshBtn").addEventListener("click", loadUsage);
       document.getElementById("cancelStrategyBtn").addEventListener("click", closeStrategy);
       document.getElementById("saveStrategyBtn").addEventListener("click", saveStrategy);
+      document.getElementById("cancelHistoryBtn").addEventListener("click", closeHistory);
       document.getElementById("cancelRemarkBtn").addEventListener("click", closeRemark);
       document.getElementById("saveRemarkBtn").addEventListener("click", saveRemark);
+      groupSelectTrigger.addEventListener("click", (event) => {
+        event.stopPropagation();
+        toggleCustomSelect(groupSelect);
+      });
+      groupSelectMenu.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
+      rangeSelectTrigger.addEventListener("click", (event) => {
+        event.stopPropagation();
+        toggleCustomSelect(rangeSelect);
+      });
+      rangeSelectMenu.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
+      document.addEventListener("click", () => {
+        closeCustomSelects();
+      });
       overlay.addEventListener("click", (event) => {
         if (event.target === overlay) closeConfig();
       });
       strategyOverlay.addEventListener("click", (event) => {
         if (event.target === strategyOverlay) closeStrategy();
+      });
+      historyOverlay.addEventListener("click", (event) => {
+        if (event.target === historyOverlay) closeHistory();
       });
       remarkOverlay.addEventListener("click", (event) => {
         if (event.target === remarkOverlay) closeRemark();

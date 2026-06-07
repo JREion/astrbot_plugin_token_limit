@@ -8,7 +8,7 @@
   "limited_groups": {
     "description": "需要限流的 QQ 群聊列表",
     "type": "list",
-    "hint": "填写 QQ 群号。原生 WebUI 可逐项填写；也兼容逗号、空格或换行分隔的字符串。",
+    "hint": "填写 QQ 群号。原生 WebUI 可逐项填写；也兼容逗号、空格或换行分隔的字符串。新加入的群号会从加入时刻开始写入历史 token 用量统计；之后即使从列表移除也会继续统计。",
     "default": []
   },
   "daily_token_limit": {
@@ -64,7 +64,7 @@
   "match_unique_session": {
     "description": "兼容会话隔离统计",
     "type": "bool",
-    "hint": "开启后统计历史用量时，会匹配常见 unique_session 形式，例如 用户ID_群号。",
+    "hint": "开启后统计当前窗口和历史用量时，会匹配常见 unique_session 形式，例如 用户ID_群号。",
     "default": true
   },
   "block_message": {

@@ -1,9 +1,9 @@
 name: astrbot_plugin_token_limit
 description: 限制 QQ 群聊的每日 LLM token 用量，避免过度消耗。超限后可停止对话 / 回退到小模型。
 short_desc: 按 QQ 群每日 token 用量拦截 LLM 请求
-version: 0.3.1
+version: 0.4.0
 author: QingChen
-repo: ""
+repo: "https://github.com/JREion/astrbot_plugin_token_limit"
 display_name: Token 用量限流
 support_platforms:
   - aiocqhttp

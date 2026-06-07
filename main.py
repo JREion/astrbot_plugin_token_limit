@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -22,6 +23,11 @@ except ImportError:  # pragma: no cover - kept for older AstrBot builds.
 from astrbot.core.db.po import ProviderStat
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.message_type import MessageType
+
+try:
+    from .backend.history_stats import HistoryStatsMixin
+except ImportError:  # pragma: no cover - compatible with direct module loading.
+    from backend.history_stats import HistoryStatsMixin
 
 
 PLUGIN_NAME = "astrbot_plugin_token_limit"
@@ -46,7 +52,7 @@ CONFIG_SCHEMA: dict[str, dict[str, Any]] = {
     "limited_groups": {
         "description": "需要限流的 QQ 群聊列表",
         "type": "list",
-        "hint": "填写 QQ 群号。原生 WebUI 可逐项填写；也兼容逗号、空格或换行分隔的字符串。",
+        "hint": "填写 QQ 群号。原生 WebUI 可逐项填写；也兼容逗号、空格或换行分隔的字符串。新加入的群号会从加入时刻开始写入历史 token 用量统计；之后即使从列表移除也会继续统计。",
         "default": [],
     },
     "daily_token_limit": {
@@ -102,7 +108,7 @@ CONFIG_SCHEMA: dict[str, dict[str, Any]] = {
     "match_unique_session": {
         "description": "兼容会话隔离统计",
         "type": "bool",
-        "hint": "开启后统计历史用量时，会匹配常见 unique_session 形式，例如 用户ID_群号。",
+        "hint": "开启后统计当前窗口和历史用量时，会匹配常见 unique_session 形式，例如 用户ID_群号。",
         "default": True,
     },
     "block_message": {
@@ -203,12 +209,16 @@ def _build_usage_window(refresh_time: Any) -> UsageWindow:
     )
 
 
-class Main(Star):
+class Main(HistoryStatsMixin, Star):
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context)
         self.context = context
         self.config = config if config is not None else {}
         self.group_remarks_path = self._resolve_group_remarks_path()
+        self.history_stats_path = self._resolve_history_stats_path()
+        self._history_last_sync_attempt: datetime | None = None
+        self._history_sync_lock = asyncio.Lock()
+        self._ensure_history_tracking_for_current_groups()
         self.context.register_web_api(
             f"/{PLUGIN_NAME}/config",
             self.api_get_config,
@@ -226,6 +236,12 @@ class Main(Star):
             self.api_get_usage,
             ["GET"],
             "获取 QQ 群 token 用量统计",
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/history",
+            self.api_get_history,
+            ["GET"],
+            "获取 QQ 群 token 历史用量统计",
         )
         self.context.register_web_api(
             f"/{PLUGIN_NAME}/providers",
@@ -246,6 +262,12 @@ class Main(Star):
             ["POST"],
             "Save QQ group remark",
         )
+
+    async def initialize(self) -> None:
+        self._start_history_background_sync()
+
+    async def terminate(self) -> None:
+        await self._stop_history_background_sync()
 
     def _resolve_group_remarks_path(self) -> Path:
         if StarTools is not None:
@@ -427,30 +449,59 @@ class Main(Star):
             filters.append(ProviderStat.umo.in_(umo_candidates))
 
         async with db.get_db() as session:
-            total_result = await session.execute(
-                select(func.coalesce(func.sum(TOKEN_FIELDS_SUM), 0)).where(*filters)
-            )
-            total = int(total_result.scalar_one() or 0)
-
-            rows_result = await session.execute(
-                select(ProviderStat.created_at, TOKEN_FIELDS_SUM.label("tokens"))
-                .where(*filters)
-                .order_by(col(ProviderStat.created_at).asc())
-            )
             hourly: dict[str, int] = {}
-            for created_at, tokens in rows_result.all():
-                created_at_utc = (
-                    created_at.replace(tzinfo=timezone.utc)
-                    if created_at.tzinfo is None
-                    else created_at.astimezone(timezone.utc)
+            total = 0
+            database_url = str(getattr(db, "DATABASE_URL", "") or "").lower()
+            if "sqlite" in database_url:
+                bucket_expr = func.strftime(
+                    "%Y-%m-%dT%H:00:00+00:00",
+                    ProviderStat.created_at,
                 )
-                bucket = created_at_utc.astimezone(window.start_local.tzinfo).replace(
-                    minute=0,
-                    second=0,
-                    microsecond=0,
+                rows_result = await session.execute(
+                    select(
+                        bucket_expr.label("bucket"),
+                        func.coalesce(func.sum(TOKEN_FIELDS_SUM), 0).label("tokens"),
+                    )
+                    .where(*filters)
+                    .group_by(bucket_expr)
+                    .order_by(bucket_expr.asc())
                 )
-                key = bucket.isoformat()
-                hourly[key] = hourly.get(key, 0) + int(tokens or 0)
+                for bucket, tokens in rows_result.all():
+                    if not bucket:
+                        continue
+                    bucket_utc = datetime.fromisoformat(str(bucket))
+                    if bucket_utc.tzinfo is None:
+                        bucket_utc = bucket_utc.replace(tzinfo=timezone.utc)
+                    else:
+                        bucket_utc = bucket_utc.astimezone(timezone.utc)
+                    bucket_local = bucket_utc.astimezone(window.start_local.tzinfo)
+                    normalized_tokens = int(tokens or 0)
+                    hourly[bucket_local.isoformat()] = normalized_tokens
+                    total += normalized_tokens
+            else:
+                total_result = await session.execute(
+                    select(func.coalesce(func.sum(TOKEN_FIELDS_SUM), 0)).where(*filters)
+                )
+                total = int(total_result.scalar_one() or 0)
+
+                rows_result = await session.execute(
+                    select(ProviderStat.created_at, TOKEN_FIELDS_SUM.label("tokens"))
+                    .where(*filters)
+                    .order_by(col(ProviderStat.created_at).asc())
+                )
+                for created_at, tokens in rows_result.all():
+                    created_at_utc = (
+                        created_at.replace(tzinfo=timezone.utc)
+                        if created_at.tzinfo is None
+                        else created_at.astimezone(timezone.utc)
+                    )
+                    bucket = created_at_utc.astimezone(window.start_local.tzinfo).replace(
+                        minute=0,
+                        second=0,
+                        microsecond=0,
+                    )
+                    key = bucket.isoformat()
+                    hourly[key] = hourly.get(key, 0) + int(tokens or 0)
         return total, hourly
 
     async def _query_split_usage_for_group(
@@ -812,6 +863,7 @@ class Main(Star):
         save_config = getattr(self.config, "save_config", None)
         if callable(save_config):
             save_config()
+        await self._maybe_sync_history_stats(force=True)
         return _ok(
             {
                 "config": self._serialize_config(),
@@ -821,6 +873,7 @@ class Main(Star):
 
     async def api_get_usage(self) -> dict:
         try:
+            await self._maybe_sync_history_stats()
             return _ok(await self._build_usage_payload())
         except Exception as exc:
             logger.error("获取 QQ 群 token 用量失败: %s", exc, exc_info=True)
@@ -857,6 +910,7 @@ class Main(Star):
 
     @filter.on_waiting_llm_request(priority=1000)
     async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
+        await self._maybe_sync_history_stats()
         limit_context = await self._build_event_limit_context(event)
         if not limit_context:
             return

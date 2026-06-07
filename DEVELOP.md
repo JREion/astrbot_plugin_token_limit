@@ -2,6 +2,46 @@
 
 本文档记录每个版本对插件结构、配置、页面和运行逻辑的变动。
 
+## 0.4.0 - 2026-06-08
+
+新增“历史 token 用量统计”能力，并把历史统计后端拆分到独立 mixin。
+
+- `metadata.yaml`
+  - 版本号更新为 `0.4.0`。
+- `_conf_schema.json`
+  - 补充 `limited_groups` 提示：新加入群号会从加入时刻开始历史统计，移除后仍继续统计。
+  - 补充 `match_unique_session` 提示：当前窗口与历史统计均使用该匹配口径。
+- `backend/`
+  - 新增后端目录，按 mixin 方式承载可独立演进的后端能力。
+- `backend/__init__.py`
+  - 新增包初始化文件。
+- `backend/history_stats.py`
+  - 新增 `HistoryStatsMixin`。
+  - 新增历史持久化文件 `history_usage.json`，保存 `tracked_since`、`last_synced_at`、`total_tokens` 和小时桶。
+  - 新增 `_ensure_history_tracking_for_current_groups()`：首次发现 `limited_groups` 中的新群号时建立追踪记录。
+  - 新增 `_maybe_sync_history_stats()`：通过异步锁串行同步；非强制同步按 5 分钟节流并复用内存缓存，强制同步用于配置保存和历史弹窗。
+  - 新增 `_sync_history_group()`：从 AstrBot `ProviderStat` 查询每小时绝对桶值，覆盖最近 2 小时窗口，避免重复累加并修正延迟写入。
+  - 新增 `api_get_history()`：返回历史统计下拉菜单、状态圆点数据、Top N 或趋势柱状图数据。
+  - 新增按小时、按日、按月的历史桶聚合函数。
+- `main.py`
+  - 引入 `HistoryStatsMixin`，`Main` 继承改为 `class Main(HistoryStatsMixin, Star)`。
+  - 初始化时解析 `history_stats_path` 并为当前 `limited_groups` 建立历史追踪。
+  - 新增 `initialize()` / `terminate()`，插件启用时启动每小时后台历史同步，禁用或重载时取消任务。
+  - 注册 `GET /astrbot_plugin_token_limit/history` Web API。
+  - `api_save_config()` 保存配置后强制同步历史统计，确保新群号立即拥有追踪起点。
+  - `api_get_usage()` 和 `on_waiting_llm_request()` 增加节流历史同步，使已追踪群即使后续从限流列表移除也能继续补齐统计。
+- `pages/dashboard/index.html`
+  - 在“插件功能”中新增蓝色“历史 token 用量统计”按钮，位于“用量超限策略配置”下方。
+  - 新增 `#historyOverlay` 历史统计弹窗。
+  - 新增自绘群聊下拉菜单：展示当前限流群号、备注、每日 token 用量和绿/黄/红状态圆点。
+  - 新增自绘时间跨度下拉菜单：`近 24 小时`、`近 7 天`、`近一个月`、`历史总和`。
+  - 新增动态柱状图：未选择群聊时展示历史总量 Top N；选择群聊后展示对应时间跨度趋势。
+  - 柱状图横纵坐标随数据变化，柱顶显示数值，并使用高度过渡动画切换数据。
+- `README.md`
+  - 新增历史统计功能、持久化策略和 Plugin Page 入口说明。
+- `STRUCTURE.md`
+  - 更新到 v0.4.0，补全后端 mixin、历史数据文件、`history` API、页面元素映射和函数职责。
+
 ## 0.3.1 - 2026-06-07
 
 修复回退策略下配置变更后硬上限失效的问题。
@@ -115,3 +155,4 @@
 - 配置保存始终写回 AstrBot 注入的插件 `AstrBotConfig` 对象。
 - 群备注是插件页面辅助数据，不属于限流配置，独立保存在插件数据目录。
 - LLM 请求钩子与 Plugin Page 用量状态必须共用同一套限流状态计算规则。
+- 历史统计使用 AstrBot 原生 `ProviderStat` 作为数据源，插件只保存小时级绝对桶值和总量，不维护独立请求明细。
