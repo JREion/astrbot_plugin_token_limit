@@ -1,0 +1,1053 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>QQ 群 Token 限流</title>
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f7f8fb;
+        --panel: #ffffff;
+        --text: #18202f;
+        --muted: #697386;
+        --line: #dce2ea;
+        --green: #1f9d72;
+        --red: #d84a4a;
+        --yellow: #f3c442;
+        --yellow-dark: #8a6500;
+        --blue: #2d6cdf;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        letter-spacing: 0;
+      }
+
+      button,
+      input,
+      textarea {
+        font: inherit;
+      }
+
+      .app {
+        min-height: 100vh;
+        padding: 24px;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.8fr);
+        gap: 18px;
+        max-width: 1220px;
+        margin: 0 auto;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        min-width: 0;
+      }
+
+      .panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .panel-title {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+      }
+
+      .panel-subtitle {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .usage-list {
+        display: grid;
+        gap: 16px;
+        padding: 20px;
+      }
+
+      .usage-row {
+        display: grid;
+        gap: 8px;
+      }
+
+      .usage-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        font-size: 14px;
+      }
+
+      .group-info {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .group-text {
+        min-width: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        flex-wrap: wrap;
+      }
+
+      .group-id {
+        font-weight: 700;
+        word-break: break-all;
+      }
+
+      .group-remark {
+        color: #8a94a6;
+        font-size: 13px;
+        line-height: 1.3;
+        word-break: break-all;
+      }
+
+      .usage-value {
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      .usage-value.fallback {
+        color: #b58100;
+        font-weight: 700;
+      }
+
+      .usage-side {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        flex: 0 0 auto;
+      }
+
+      .fallback-tag {
+        display: inline-flex;
+        align-items: center;
+        height: 24px;
+        border-radius: 8px;
+        border: 1px solid #f0c65a;
+        background: #fff4ce;
+        color: #8a6500;
+        padding: 0 8px;
+        font-size: 12px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .icon-button {
+        width: 30px;
+        height: 30px;
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        transition:
+          background 150ms ease,
+          border-color 150ms ease,
+          color 150ms ease,
+          transform 80ms ease;
+      }
+
+      .icon-button:hover {
+        background: #eaf1ff;
+        border-color: #c7d8ff;
+        color: var(--blue);
+      }
+
+      .icon-button:active {
+        background: #d8e5ff;
+        border-color: #abc3fb;
+        transform: translateY(1px);
+      }
+
+      .icon-button svg {
+        width: 16px;
+        height: 16px;
+        stroke-width: 2;
+      }
+
+      .progress-track {
+        height: 14px;
+        overflow: hidden;
+        border-radius: 7px;
+        background: #edf1f6;
+        border: 1px solid #e3e8ef;
+      }
+
+      .progress-fill {
+        height: 100%;
+        width: 0%;
+        background: var(--green);
+        transition: width 180ms ease;
+      }
+
+      .progress-fill.over {
+        background: var(--red);
+      }
+
+      .progress-fill.fallback {
+        background: var(--yellow);
+      }
+
+      .empty {
+        padding: 42px 20px;
+        text-align: center;
+        color: var(--muted);
+      }
+
+      .feature-body {
+        padding: 20px;
+      }
+
+      .config-button {
+        width: 100%;
+        border: 1px solid #ddb33b;
+        background: var(--yellow);
+        color: var(--yellow-dark);
+        border-radius: 8px;
+        padding: 12px 14px;
+        cursor: pointer;
+        font-weight: 700;
+        transition:
+          background 150ms ease,
+          border-color 150ms ease,
+          color 150ms ease,
+          transform 80ms ease;
+      }
+
+      .config-button:hover {
+        background: #ffd95b;
+        border-color: #c99a14;
+        color: #5f4600;
+      }
+
+      .config-button:active {
+        background: #e7b72c;
+        border-color: #b28610;
+        transform: translateY(1px);
+      }
+
+      .strategy-button {
+        width: 100%;
+        border: 1px solid var(--blue);
+        background: var(--blue);
+        color: #fff;
+        border-radius: 8px;
+        padding: 12px 14px;
+        cursor: pointer;
+        font-weight: 700;
+        margin-bottom: 10px;
+        transition:
+          background 150ms ease,
+          border-color 150ms ease,
+          transform 80ms ease;
+      }
+
+      .strategy-button:hover {
+        background: #1f5fcf;
+        border-color: #1f5fcf;
+      }
+
+      .strategy-button:active {
+        background: #194fae;
+        border-color: #194fae;
+        transform: translateY(1px);
+      }
+
+      .status-line {
+        margin-top: 14px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .overlay {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(14, 20, 31, 0.42);
+        z-index: 20;
+      }
+
+      .overlay.open {
+        display: flex;
+      }
+
+      .overlay.compact .modal {
+        width: min(420px, 100%);
+        max-height: calc(100vh - 48px);
+      }
+
+      .modal {
+        width: min(980px, 100%);
+        max-height: min(760px, calc(100vh - 48px));
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        background: #fff;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        box-shadow: 0 18px 46px rgba(11, 18, 32, 0.22);
+        overflow: hidden;
+      }
+
+      .modal-topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .modal-title {
+        font-size: 16px;
+        font-weight: 700;
+      }
+
+      .modal-actions {
+        display: flex;
+        gap: 8px;
+      }
+
+      .action-button {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+        color: var(--text);
+        padding: 8px 13px;
+        cursor: pointer;
+        transition:
+          background 150ms ease,
+          border-color 150ms ease,
+          color 150ms ease,
+          transform 80ms ease;
+      }
+
+      .action-button:hover {
+        background: #eef4ff;
+        border-color: #bfd0f2;
+        color: #1d57bb;
+      }
+
+      .action-button:active {
+        background: #dde9ff;
+        border-color: #9eb9ee;
+        transform: translateY(1px);
+      }
+
+      .action-button.primary {
+        background: var(--blue);
+        border-color: var(--blue);
+        color: #fff;
+      }
+
+      .action-button.primary:hover {
+        background: #1f5fcf;
+        border-color: #1f5fcf;
+        color: #fff;
+      }
+
+      .action-button.primary:active {
+        background: #194fae;
+        border-color: #194fae;
+      }
+
+      .modal-content {
+        overflow: auto;
+        padding: 4px 18px 18px;
+      }
+
+      .config-row {
+        display: grid;
+        grid-template-columns: minmax(220px, 0.85fr) minmax(260px, 1fr);
+        gap: 20px;
+        align-items: start;
+        padding: 16px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .config-row:last-child {
+        border-bottom: 0;
+      }
+
+      .config-name {
+        font-weight: 700;
+        margin-bottom: 6px;
+      }
+
+      .config-hint {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.55;
+      }
+
+      .field {
+        width: 100%;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        padding: 9px 10px;
+        background: #fff;
+        color: var(--text);
+      }
+
+      .field:focus {
+        outline: 2px solid rgba(45, 108, 223, 0.18);
+        border-color: var(--blue);
+      }
+
+      textarea.field {
+        min-height: 92px;
+        resize: vertical;
+      }
+
+      .remark-form {
+        display: grid;
+        gap: 12px;
+        padding-top: 14px;
+      }
+
+      .remark-target {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .remark-hint {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .strategy-form {
+        display: grid;
+        gap: 0;
+      }
+
+      .strategy-form .config-row:first-child {
+        padding-top: 14px;
+      }
+
+      .switch {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .switch input {
+        width: 18px;
+        height: 18px;
+      }
+
+      .toast {
+        min-height: 20px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .toast.error {
+        color: var(--red);
+      }
+
+      @media (max-width: 860px) {
+        .app {
+          padding: 14px;
+        }
+
+        .layout,
+        .config-row {
+          grid-template-columns: 1fr;
+        }
+
+        .modal {
+          max-height: calc(100vh - 28px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <section class="layout">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h1 class="panel-title">用量统计</h1>
+              <p id="windowText" class="panel-subtitle"></p>
+            </div>
+            <button id="refreshBtn" class="action-button" type="button">刷新</button>
+          </div>
+          <div id="usageList" class="usage-list"></div>
+        </section>
+
+        <aside class="panel">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title">插件功能</h2>
+            </div>
+          </div>
+          <div class="feature-body">
+            <button id="openStrategyBtn" class="strategy-button" type="button">
+              用量超限策略配置
+            </button>
+            <button id="openConfigBtn" class="config-button" type="button">
+              更多插件配置 ...
+            </button>
+            <div id="statusLine" class="status-line"></div>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <div id="overlay" class="overlay" role="dialog" aria-modal="true">
+      <section class="modal">
+        <div class="modal-topbar">
+          <div class="modal-title">插件配置</div>
+          <div class="modal-actions">
+            <button id="saveBtn" class="action-button primary" type="button">
+              保存
+            </button>
+            <button id="cancelBtn" class="action-button" type="button">取消</button>
+          </div>
+        </div>
+        <div class="modal-content">
+          <div id="configForm"></div>
+          <div id="toast" class="toast"></div>
+        </div>
+      </section>
+    </div>
+
+    <div id="strategyOverlay" class="overlay" role="dialog" aria-modal="true">
+      <section class="modal">
+        <div class="modal-topbar">
+          <div class="modal-title">用量超限时的措施</div>
+          <div class="modal-actions">
+            <button id="saveStrategyBtn" class="action-button primary" type="button">
+              保存
+            </button>
+            <button id="cancelStrategyBtn" class="action-button" type="button">取消</button>
+          </div>
+        </div>
+        <div class="modal-content">
+          <div id="strategyForm" class="strategy-form"></div>
+          <div id="strategyToast" class="toast"></div>
+        </div>
+      </section>
+    </div>
+
+    <div id="remarkOverlay" class="overlay compact" role="dialog" aria-modal="true">
+      <section class="modal">
+        <div class="modal-topbar">
+          <div class="modal-title">群聊备注</div>
+          <div class="modal-actions">
+            <button id="saveRemarkBtn" class="action-button primary" type="button">
+              保存
+            </button>
+            <button id="cancelRemarkBtn" class="action-button" type="button">取消</button>
+          </div>
+        </div>
+        <div class="modal-content">
+          <div class="remark-form">
+            <div id="remarkTarget" class="remark-target"></div>
+            <input
+              id="remarkInput"
+              class="field"
+              type="text"
+              maxlength="64"
+              placeholder="输入备注名"
+            />
+            <div id="remarkToast" class="toast"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      const api = window.AstrBotPluginPage;
+      const state = {
+        config: {},
+        draft: {},
+        strategyDraft: {},
+        schema: {},
+        currentRemarkGroupId: "",
+      };
+
+      const usageList = document.getElementById("usageList");
+      const windowText = document.getElementById("windowText");
+      const statusLine = document.getElementById("statusLine");
+      const overlay = document.getElementById("overlay");
+      const strategyOverlay = document.getElementById("strategyOverlay");
+      const remarkOverlay = document.getElementById("remarkOverlay");
+      const configForm = document.getElementById("configForm");
+      const strategyForm = document.getElementById("strategyForm");
+      const toast = document.getElementById("toast");
+      const strategyToast = document.getElementById("strategyToast");
+      const remarkInput = document.getElementById("remarkInput");
+      const remarkTarget = document.getElementById("remarkTarget");
+      const remarkToast = document.getElementById("remarkToast");
+
+      function setToast(message, isError = false) {
+        toast.textContent = message || "";
+        toast.classList.toggle("error", Boolean(isError));
+      }
+
+      function setStrategyToast(message, isError = false) {
+        strategyToast.textContent = message || "";
+        strategyToast.classList.toggle("error", Boolean(isError));
+      }
+
+      function setRemarkToast(message, isError = false) {
+        remarkToast.textContent = message || "";
+        remarkToast.classList.toggle("error", Boolean(isError));
+      }
+
+      function createPencilIcon() {
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", "0 0 24 24");
+        svg.setAttribute("fill", "none");
+        svg.setAttribute("stroke", "currentColor");
+        svg.setAttribute("stroke-linecap", "round");
+        svg.setAttribute("stroke-linejoin", "round");
+
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute(
+          "d",
+          "M12 20h9 M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z",
+        );
+        svg.append(path);
+        return svg;
+      }
+
+      function formatDate(value) {
+        if (!value) return "";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return value;
+        const pad = (num) => String(num).padStart(2, "0");
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+      }
+
+      function normalizeListText(value) {
+        if (Array.isArray(value)) return value.join("\n");
+        return normalizeTextareaText(value);
+      }
+
+      function normalizeTextareaText(value) {
+        return String(value || "").replace(/\\n/g, "\n");
+      }
+
+      function parseListText(value) {
+        return String(value || "")
+          .split(/[\s,;，；]+/)
+          .map((item) => item.trim())
+          .filter(Boolean);
+      }
+
+      function inputTypeFor(meta) {
+        if (meta.type === "int" || meta.type === "float") return "number";
+        return "text";
+      }
+
+      function optionLabel(meta, option, index) {
+        if (Array.isArray(meta.option_labels) && meta.option_labels[index]) {
+          return meta.option_labels[index];
+        }
+        return option;
+      }
+
+      function renderConfigControl(key, meta, draft, onChange) {
+        const control = document.createElement("div");
+        if (meta.options) {
+          const select = document.createElement("select");
+          select.className = "field";
+          const originalOptions = Array.isArray(meta.options) ? meta.options : [];
+          const options = [...originalOptions];
+          const currentValue = draft[key] ?? meta.default ?? "";
+          if (currentValue && !options.includes(currentValue)) {
+            options.unshift(currentValue);
+          }
+          if (!options.length) {
+            const item = document.createElement("option");
+            item.value = "";
+            item.textContent = "暂无可用选项";
+            select.append(item);
+          }
+          options.forEach((option, index) => {
+            const item = document.createElement("option");
+            const originalIndex = originalOptions.indexOf(option);
+            item.value = option;
+            item.textContent =
+              originalIndex >= 0 ? optionLabel(meta, option, originalIndex) : option;
+            select.append(item);
+          });
+          select.value = currentValue;
+          select.addEventListener("change", () => {
+            draft[key] = select.value;
+            if (onChange) onChange(key, select.value);
+          });
+          control.append(select);
+        } else if (meta.type === "bool") {
+          const label = document.createElement("label");
+          label.className = "switch";
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.checked = Boolean(draft[key]);
+          input.addEventListener("change", () => {
+            draft[key] = input.checked;
+            if (onChange) onChange(key, input.checked);
+          });
+          const text = document.createElement("span");
+          text.textContent = input.checked ? "启用" : "关闭";
+          input.addEventListener("change", () => {
+            text.textContent = input.checked ? "启用" : "关闭";
+          });
+          label.append(input, text);
+          control.append(label);
+        } else if (meta.type === "list") {
+          const textarea = document.createElement("textarea");
+          textarea.className = "field";
+          textarea.value = normalizeListText(draft[key]);
+          textarea.addEventListener("input", () => {
+            draft[key] = parseListText(textarea.value);
+            if (onChange) onChange(key, draft[key]);
+          });
+          control.append(textarea);
+        } else if (meta.type === "text") {
+          const textarea = document.createElement("textarea");
+          textarea.className = "field";
+          textarea.value = normalizeTextareaText(draft[key]);
+          textarea.addEventListener("input", () => {
+            draft[key] = textarea.value;
+            if (onChange) onChange(key, textarea.value);
+          });
+          control.append(textarea);
+        } else {
+          const input = document.createElement("input");
+          input.className = "field";
+          input.type = inputTypeFor(meta);
+          input.value = draft[key] ?? "";
+          if (meta.type === "int") input.step = "1";
+          input.addEventListener("input", () => {
+            draft[key] =
+              meta.type === "int" ? Number.parseInt(input.value || "0", 10) : input.value;
+            if (onChange) onChange(key, draft[key]);
+          });
+          control.append(input);
+        }
+        return control;
+      }
+
+      function appendConfigRow(container, key, meta, draft, onChange) {
+          if (!meta) return;
+          const row = document.createElement("div");
+          row.className = "config-row";
+
+          const info = document.createElement("div");
+          const name = document.createElement("div");
+          name.className = "config-name";
+          name.textContent = meta.description || key;
+          const hint = document.createElement("div");
+          hint.className = "config-hint";
+          hint.textContent = meta.hint || "";
+          info.append(name, hint);
+
+          const control = renderConfigControl(key, meta, draft, onChange);
+
+          row.append(info, control);
+          container.append(row);
+      }
+
+      function renderConfigForm() {
+        configForm.innerHTML = "";
+        Object.entries(state.schema).forEach(([key, meta]) => {
+          if (key === "over_limit_policy") return;
+          if (meta.type === "object") return;
+          appendConfigRow(configForm, key, meta, state.draft);
+        });
+      }
+
+      function renderStrategyForm() {
+        strategyForm.innerHTML = "";
+        const policyMeta = state.schema.over_limit_policy || {};
+        const items = policyMeta.items || {};
+        appendConfigRow(strategyForm, "action", items.action, state.strategyDraft, () => {
+          renderStrategyForm();
+        });
+        if (state.strategyDraft.action === "fallback_provider") {
+          appendConfigRow(
+            strategyForm,
+            "fallback_provider_id",
+            items.fallback_provider_id,
+            state.strategyDraft,
+          );
+          appendConfigRow(
+            strategyForm,
+            "fallback_token_limit",
+            items.fallback_token_limit,
+            state.strategyDraft,
+          );
+        }
+      }
+
+      function renderUsage(payload) {
+        const groups = payload.groups || [];
+        windowText.textContent = payload.window
+          ? `${formatDate(payload.window.start)} - ${formatDate(payload.window.end)}`
+          : "";
+        statusLine.textContent = payload.enabled
+          ? "当前限流插件已启用"
+          : "当前限流插件未启用";
+
+        usageList.innerHTML = "";
+        if (!groups.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "尚未配置需要限流的 QQ 群聊";
+          usageList.append(empty);
+          return;
+        }
+
+        groups.forEach((group) => {
+          const row = document.createElement("div");
+          row.className = "usage-row";
+
+          const meta = document.createElement("div");
+          meta.className = "usage-meta";
+
+          const groupInfo = document.createElement("div");
+          groupInfo.className = "group-info";
+
+          const groupText = document.createElement("div");
+          groupText.className = "group-text";
+
+          const groupId = document.createElement("div");
+          groupId.className = "group-id";
+          groupId.textContent = group.group_id;
+
+          groupText.append(groupId);
+
+          if (group.remark) {
+            const groupRemark = document.createElement("div");
+            groupRemark.className = "group-remark";
+            groupRemark.textContent = `（${group.remark}）`;
+            groupText.append(groupRemark);
+          }
+
+          const remarkButton = document.createElement("button");
+          remarkButton.className = "icon-button";
+          remarkButton.type = "button";
+          remarkButton.title = "编辑备注";
+          remarkButton.setAttribute("aria-label", `编辑 ${group.group_id} 的备注`);
+          remarkButton.append(createPencilIcon());
+          remarkButton.addEventListener("click", () => {
+            openRemark(group.group_id, group.remark || "");
+          });
+
+          groupInfo.append(groupText, remarkButton);
+
+          const usageSide = document.createElement("div");
+          usageSide.className = "usage-side";
+          if (group.using_fallback) {
+            const fallbackTag = document.createElement("div");
+            fallbackTag.className = "fallback-tag";
+            fallbackTag.textContent = "回退模型";
+            usageSide.append(fallbackTag);
+          }
+
+          const value = document.createElement("div");
+          value.className = "usage-value";
+          if (group.using_fallback) value.classList.add("fallback");
+          value.textContent = `${group.used_display}/${group.limit_display}`;
+          usageSide.append(value);
+          meta.append(groupInfo, usageSide);
+
+          const track = document.createElement("div");
+          track.className = "progress-track";
+          const fill = document.createElement("div");
+          fill.className = `progress-fill${group.limited ? " over" : ""}${group.using_fallback ? " fallback" : ""}`;
+          fill.style.width = `${Math.max(0, Math.min(100, group.percent || 0))}%`;
+          track.append(fill);
+
+          row.append(meta, track);
+          usageList.append(row);
+        });
+      }
+
+      async function loadConfig() {
+        const payload = await api.apiGet("config");
+        state.config = payload.config || {};
+        state.schema = payload.schema || {};
+      }
+
+      async function loadUsage() {
+        const payload = await api.apiGet("usage");
+        renderUsage(payload);
+      }
+
+      async function openConfig() {
+        setToast("");
+        await loadConfig();
+        state.draft = JSON.parse(JSON.stringify(state.config));
+        renderConfigForm();
+        overlay.classList.add("open");
+      }
+
+      async function openStrategy() {
+        setStrategyToast("");
+        await loadConfig();
+        const policy =
+          state.config.over_limit_policy ||
+          state.schema.over_limit_policy?.default ||
+          {};
+        state.strategyDraft = JSON.parse(JSON.stringify(policy));
+        state.strategyDraft.action = state.strategyDraft.action || "stop_llm";
+        renderStrategyForm();
+        strategyOverlay.classList.add("open");
+      }
+
+      function closeConfig() {
+        overlay.classList.remove("open");
+        state.draft = {};
+        setToast("");
+      }
+
+      function closeStrategy() {
+        strategyOverlay.classList.remove("open");
+        state.strategyDraft = {};
+        setStrategyToast("");
+      }
+
+      function openRemark(groupId, remark) {
+        state.currentRemarkGroupId = String(groupId || "");
+        remarkTarget.textContent = `QQ 群号：${state.currentRemarkGroupId}`;
+        remarkInput.value = remark || "";
+        setRemarkToast("");
+        remarkOverlay.classList.add("open");
+        window.requestAnimationFrame(() => {
+          remarkInput.focus();
+          remarkInput.select();
+        });
+      }
+
+      function closeRemark() {
+        remarkOverlay.classList.remove("open");
+        state.currentRemarkGroupId = "";
+        remarkInput.value = "";
+        setRemarkToast("");
+      }
+
+      async function saveConfig() {
+        try {
+          setToast("保存中...");
+          const payload = await api.apiPost("config", { config: state.draft });
+          state.config = payload.config || {};
+          closeConfig();
+          await loadUsage();
+        } catch (error) {
+          setToast(error.message || String(error), true);
+        }
+      }
+
+      async function saveStrategy() {
+        try {
+          setStrategyToast("保存中...");
+          const payload = await api.apiPost("config", {
+            config: {
+              ...state.config,
+              over_limit_policy: state.strategyDraft,
+            },
+          });
+          state.config = payload.config || {};
+          closeStrategy();
+          await loadUsage();
+        } catch (error) {
+          setStrategyToast(error.message || String(error), true);
+        }
+      }
+
+      async function saveRemark() {
+        if (!state.currentRemarkGroupId) return;
+
+        try {
+          setRemarkToast("保存中...");
+          await api.apiPost("remarks", {
+            group_id: state.currentRemarkGroupId,
+            remark: remarkInput.value,
+          });
+          closeRemark();
+          await loadUsage();
+        } catch (error) {
+          setRemarkToast(error.message || String(error), true);
+        }
+      }
+
+      document.getElementById("openConfigBtn").addEventListener("click", openConfig);
+      document.getElementById("openStrategyBtn").addEventListener("click", openStrategy);
+      document.getElementById("cancelBtn").addEventListener("click", closeConfig);
+      document.getElementById("saveBtn").addEventListener("click", saveConfig);
+      document.getElementById("refreshBtn").addEventListener("click", loadUsage);
+      document.getElementById("cancelStrategyBtn").addEventListener("click", closeStrategy);
+      document.getElementById("saveStrategyBtn").addEventListener("click", saveStrategy);
+      document.getElementById("cancelRemarkBtn").addEventListener("click", closeRemark);
+      document.getElementById("saveRemarkBtn").addEventListener("click", saveRemark);
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) closeConfig();
+      });
+      strategyOverlay.addEventListener("click", (event) => {
+        if (event.target === strategyOverlay) closeStrategy();
+      });
+      remarkOverlay.addEventListener("click", (event) => {
+        if (event.target === remarkOverlay) closeRemark();
+      });
+      remarkInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          saveRemark();
+        } else if (event.key === "Escape") {
+          closeRemark();
+        }
+      });
+
+      async function init() {
+        await api.ready();
+        await loadConfig();
+        await loadUsage();
+      }
+
+      init().catch((error) => {
+        usageList.innerHTML = `<div class="empty">${error.message || error}</div>`;
+      });
+    </script>
+  </body>
+</html>
