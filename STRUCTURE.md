@@ -1,6 +1,6 @@
 # STRUCTURE
 
-本文档记录 v0.6.0 版本的插件结构、内部 API、页面元素映射和主要函数职责。
+本文档记录 v0.6.1 版本的插件结构、内部 API、页面元素映射和主要函数职责。
 
 ## 文件结构
 
@@ -16,6 +16,7 @@ astrbot_plugin_token_limit/
 ├── backend/
 │   ├── __init__.py
 │   ├── history_stats.py
+│   ├── user_limits.py
 │   └── user_stats.py
 └── pages/
     └── dashboard/
@@ -42,7 +43,7 @@ astrbot_plugin_token_limit/
 ### metadata.yaml
 
 - `name`：插件名称，当前为 `astrbot_plugin_token_limit`。
-- `version`：当前版本 `0.6.0`。
+- `version`：当前版本 `0.6.1`。
 - `repo`：插件仓库地址。
 - `support_platforms`：默认支持 `aiocqhttp`、`qq_official`、`qq_official_webhook`。
 - `pages`：声明 `dashboard` Plugin Page，页面文件为 `pages/dashboard/index.html`。
@@ -56,6 +57,7 @@ astrbot_plugin_token_limit/
 | `enabled` | 插件总开关。 |
 | `limited_groups` | 需要限流的 QQ 群号列表；新群号会从加入时刻开始历史统计。 |
 | `daily_token_limit` | 单群当前统计窗口内基础 token 上限。 |
+| `user_daily_token_limit` | 单个群聊内单个用户当前统计窗口 token 上限；`-1` 表示不启用。 |
 | `over_limit_policy.action` | 超限策略：`stop_llm` 或 `fallback_provider`。 |
 | `over_limit_policy.fallback_provider_id` | 回退模型供应商 ID。 |
 | `over_limit_policy.fallback_token_limit` | 回退模型额外 token 上限；硬上限为 `daily_token_limit + fallback_token_limit`。 |
@@ -94,7 +96,7 @@ astrbot_plugin_token_limit/
 
 ### Main 初始化
 
-`class Main(UserStatsMixin, HistoryStatsMixin, Star)` 组合今日用户统计、历史统计 mixin 和 AstrBot `Star`。
+`class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star)` 组合单用户限流、今日用户统计、历史统计 mixin 和 AstrBot `Star`。
 
 `__init__(context, config)`：
 
@@ -133,7 +135,7 @@ astrbot_plugin_token_limit/
 - `_load_group_limits()` / `_save_group_limits()`：读写 `group_limits.json`，按群号保存非负整数 token 上限。
 - `_config_value()`：读取配置，缺省时使用 schema 默认值。
 - `_serialize_config()`：输出完整配置快照。
-- `_sanitize_config()`：校验并标准化所有配置项。
+- `_sanitize_config()`：校验并标准化所有配置项；`user_daily_token_limit` 最小值为 `-1`，`-1` 表示关闭单用户限流。
 - `_sanitize_over_limit_policy()`：校验超限策略，回退策略必须填写且能找到供应商，并保存“超限后不再响应唤醒词”开关。
 - `_normalize_config_list()`：标准化列表型配置。
 
@@ -204,6 +206,7 @@ astrbot_plugin_token_limit/
 
 - `on_waiting_llm_request(event)`：
   - 先调用 `_remember_user_usage_event()` 尽量缓存群内用户 QQ 昵称。
+  - 调用 `_block_user_daily_limit_if_needed()`；启用单用户上限且该用户在该群当前窗口用量达到上限时，静默 `event.stop_event()`，不进入回退模型，也不发送群聊提示。
   - 先调用 `_maybe_sync_history_stats()`，按 5 分钟节流补齐历史统计。
   - 调用 `_maybe_sync_user_stats()`，按 2 分钟节流补齐近 48 小时用户统计。
   - 在 AstrBot 选择 provider 之前计算限流状态。
@@ -211,10 +214,26 @@ astrbot_plugin_token_limit/
   - 回退区间且回退供应商有效时写入 `event.set_extra("selected_provider", fallback_provider_id)`。
   - 回退供应商失效时不写入，交给 AstrBot 当前可用供应商。
 - `on_llm_request(event, req)`：
+  - 先补充带 `conversation_id` 的用户请求归因快照，并再次执行单用户上限兜底静默阻断。
   - 复用 `_build_event_limit_context()` 做兜底。
   - 再次执行唤醒词阻断判断，避免等待 LLM 钩子未生效时漏拦。
   - `normal` 和 `fallback` 放行。
   - `stopped` 时按配置发送 `block_message` 并 `event.stop_event()`。
+
+## backend/user_limits.py
+
+`UserLimitMixin` 独立承载“单个用户每日用量上限”的判定逻辑。该 mixin 只在 `user_daily_token_limit >= 0` 时工作；默认 `-1` 不同步、不查询、不拦截，以节约资源。
+
+### Mixin 函数
+
+- `_user_daily_limit()`：读取 `user_daily_token_limit`，非法值按 `-1` 处理。
+- `_user_daily_limit_enabled()`：判断单用户限流是否启用。
+- `_user_usage_total_for_event(event)`：
+  - 仅处理已启用插件、目标 QQ 群聊、群号在 `limited_groups` 内且可获取发送者 ID 的 LLM 事件。
+  - 强制同步该群今日用户统计。
+  - 合并 ProviderStat 实时聚合结果和 `user_usage_48h.json` 中已归因小时桶，得到该用户在该群当前刷新周期内的 token 总量。
+- `_should_block_user_daily_limit(event)`：当用户当前窗口用量达到或超过上限时返回阻断上下文。
+- `_block_user_daily_limit_if_needed(event, stage)`：静默阻断该用户本次 LLM 请求，仅写 AstrBot 日志，不发送 `block_message`，不切换回退供应商。
 
 ## backend/history_stats.py
 
@@ -329,7 +348,7 @@ astrbot_plugin_token_limit/
 - `_event_user_id()` / `_event_user_name()`：兼容不同 AstrBot 事件字段读取用户号与昵称。
 - `api_get_user_usage()`：返回群聊下拉菜单、当前窗口、同步时间，以及选中群的用户 Top N 横向柱状图数据。
 - `_user_usage_dropdown_groups()`：复用当前用量状态生成用户统计弹窗的群聊下拉菜单。
-- `_user_usage_rows()`：将用户 token 总量转为前端排行行，过滤 0 用量用户，昵称缺失时显示 QQ 号。
+- `_user_usage_rows()`：将用户 token 总量转为前端排行行，过滤 0 用量用户，昵称缺失时显示 QQ 号；启用单用户上限时附带 `over_user_limit` 供页面标红。
 
 ## pages/dashboard/index.html
 
@@ -376,7 +395,7 @@ astrbot_plugin_token_limit/
   - `#userGroupSelect` / `#userGroupSelectTrigger` / `#userGroupSelectMenu`：自绘群聊下拉菜单，行为与历史统计群聊下拉一致。
   - `#refreshUserUsageBtn`：刷新按钮，保持当前群聊选择并重新请求今日用户 token 用量。
   - `#userUsageWindow`：当前刷新周期窗口文本。
-  - `#userUsageChart`：横向柱状图容器，展示选中群聊内 Top N 用户 token 用量。
+  - `#userUsageChart`：横向柱状图容器，展示选中群聊内 Top N 用户 token 用量；超出 `user_daily_token_limit` 的用户柱子和数值显示为红色。
   - `#userUsageFooter`：最后同步时间。
 - `#remarkOverlay`：备注编辑弹窗。
   - `#remarkTarget`、`#remarkInput`、`#saveRemarkBtn`、`#cancelRemarkBtn`、`#remarkToast`。
@@ -438,13 +457,14 @@ astrbot_plugin_token_limit/
 - 点击历史柱状图中的任一柱子会显示气泡 tag，第一行为横坐标，第二行为 token 用量值；文本强制完整显示，宽度随最长文本行自适应。
 - 柱状图切换数据时通过高度过渡动画平滑变化；横纵坐标和柱顶数值由数据动态生成。
 - 今日用户 token 用量统计弹窗默认显示“选择群聊 ...”和操作提示；选中群聊后展示当前刷新周期内 token 消耗最高的 Top N 用户。
-- 今日用户统计使用横向柱状图，纵向标签为 QQ 昵称；无法获取昵称时显示 QQ 号；消耗量为 0 的用户不显示。柱子按最长纵坐标文字统一确定左侧起点，紧贴标签右侧对齐。
+- 今日用户统计使用横向柱状图，纵向标签为 QQ 昵称；无法获取昵称时显示 QQ 号；消耗量为 0 的用户不显示。柱子按最长纵坐标文字统一确定左侧起点，紧贴标签右侧对齐。启用单用户上限且用户用量达到上限时，该用户柱子和 token 数值为红色。
 - 今日用户统计弹窗每次打开、选择群聊或点击“刷新”都会重新请求后端；后端会强制同步选中群聊的 ProviderStat 和请求归因数据。
 
 ## 配置与统计同步逻辑
 
 - 当前窗口限流统计使用 `refresh_time` 切分 24 小时窗口。
 - 群聊个性化上限只覆盖基础 `daily_token_limit`；回退模型额外上限仍来自全局 `over_limit_policy.fallback_token_limit`；唤醒词阻断阈值使用该群最终有效基础上限。
+- 单用户上限 `user_daily_token_limit` 只按“某群内某用户”统计，不跨群合并；达到上限后静默阻断该用户发起的 LLM 请求，不使用回退模型，也不发送群聊提示。
 - 历史统计不依赖 `refresh_time`；它以群号首次加入 `limited_groups` 的时间为起点，按小时桶持久化。
 - 历史同步基于 AstrBot 原生 `ProviderStat`，保存的是每小时绝对桶值，不是累加 delta。
 - 今日用户统计也基于 AstrBot 原生 `ProviderStat`；持久化文件保留近 48 小时群内用户小时桶、请求归因快照和昵称缓存，不跨群合并同一个用户。

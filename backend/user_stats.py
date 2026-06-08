@@ -960,7 +960,23 @@ class UserStatsMixin:
                 "conversation_id": str(conversation_id or "").strip()[:128],
                 "assigned_stat_ids": [],
             }
-            requests.append(request_item)
+            for existing_request in requests:
+                if not isinstance(existing_request, dict):
+                    continue
+                if (
+                    existing_request.get("started_at") == request_item["started_at"]
+                    and existing_request.get("umo") == request_item["umo"]
+                    and existing_request.get("user_id") == user_id
+                ):
+                    if nickname:
+                        existing_request["nickname"] = nickname
+                    if request_item["conversation_id"]:
+                        existing_request["conversation_id"] = request_item[
+                            "conversation_id"
+                        ]
+                    break
+            else:
+                requests.append(request_item)
             changed = True
             self._prune_user_usage_requests(group_data, _now_utc())
 
@@ -1063,12 +1079,20 @@ class UserStatsMixin:
                     totals,
                     top_limit,
                 )
+            user_daily_limit = int(self._user_daily_limit())
 
             return _user_usage_ok(
                 {
                     "groups": groups,
                     "selected_group_id": selected_group_id,
                     "users": users,
+                    "user_daily_limit": user_daily_limit,
+                    "user_daily_limit_enabled": user_daily_limit >= 0,
+                    "user_daily_limit_display": (
+                        _format_user_tokens(user_daily_limit)
+                        if user_daily_limit >= 0
+                        else ""
+                    ),
                     "window": {
                         "start": window.start_local.isoformat(),
                         "end": window.end_local.isoformat(),
@@ -1122,6 +1146,8 @@ class UserStatsMixin:
         if not isinstance(users, dict):
             users = {}
         rows = []
+        user_daily_limit = int(self._user_daily_limit())
+        limit_enabled = user_daily_limit >= 0
         for user_id, tokens in totals.items():
             normalized_tokens = max(0, int(tokens or 0))
             if normalized_tokens <= 0:
@@ -1135,6 +1161,14 @@ class UserStatsMixin:
                     "label": nickname or user_id,
                     "tokens": normalized_tokens,
                     "display": _format_user_tokens(normalized_tokens),
+                    "over_user_limit": limit_enabled
+                    and normalized_tokens >= user_daily_limit,
+                    "user_limit": user_daily_limit,
+                    "user_limit_display": (
+                        _format_user_tokens(user_daily_limit)
+                        if limit_enabled
+                        else ""
+                    ),
                 }
             )
         rows.sort(key=lambda item: item["tokens"], reverse=True)

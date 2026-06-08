@@ -2,6 +2,34 @@
 
 本文档记录每个版本对插件结构、配置、页面和运行逻辑的变动。
 
+## 0.6.1 - 2026-06-08
+
+新增“单个用户每日用量上限”能力。
+
+- `metadata.yaml`
+  - 版本号更新为 `0.6.1`。
+  - 描述补充群内用户用量限制和用户用量统计。
+- `_conf_schema.json`
+  - 在 `daily_token_limit` 下方新增 `user_daily_token_limit`，默认 `-1` 表示不限制单用户用量。
+- `main.py`
+  - `CONFIG_SCHEMA` 新增 `user_daily_token_limit`。
+  - `_sanitize_config()` 校验该字段，允许最小值 `-1`。
+  - 引入 `UserLimitMixin`，`Main` 继承改为 `class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star)`。
+  - `on_waiting_llm_request()` 在群级回退/停止策略之前执行单用户上限静默阻断。
+  - `on_llm_request()` 在补充 `conversation_id` 后再次执行单用户上限兜底阻断。
+- `backend/user_limits.py`
+  - 新增 `UserLimitMixin`，独立承载单用户上限读取、启用判断、当前用户用量查询和静默阻断。
+  - 仅当 `user_daily_token_limit >= 0` 时启用判定；默认 `-1` 不触发额外用户用量查询。
+  - 达到上限时只 `event.stop_event()` 并写 AstrBot 日志，不发送 `block_message`，不切换回退模型。
+- `backend/user_stats.py`
+  - `api_get_user_usage()` 返回 `user_daily_limit`、`user_daily_limit_enabled` 和显示值。
+  - `_user_usage_rows()` 为超出单用户上限的用户行附加 `over_user_limit`，供页面标红。
+- `pages/dashboard/index.html`
+  - Plugin Page 基础配置弹窗会随 schema 在“单个群聊每日用量上限”下方渲染“单个用户每日用量上限”。
+  - 今日用户 token 用量统计柱状图中，达到单用户上限的用户柱子和 token 数值变为红色。
+- `README.md` / `STRUCTURE.md`
+  - 补充单用户上限的配置、限流规则、静默阻断行为、页面高亮和 mixin 结构说明。
+
 ## 0.6.0 - 2026-06-08
 
 新增“今日用户 token 用量统计”能力。

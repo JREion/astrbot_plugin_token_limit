@@ -888,11 +888,23 @@
         background: #1f5fcf;
       }
 
+      .user-usage-bar.over-limit {
+        background: var(--red);
+      }
+
+      .user-usage-bar.over-limit:hover {
+        background: #b91c1c;
+      }
+
       .user-usage-value {
         color: var(--muted);
         font-size: 12px;
         font-weight: 700;
         white-space: nowrap;
+      }
+
+      .user-usage-value.over-limit {
+        color: var(--red);
       }
 
       .history-tooltip {
@@ -1877,10 +1889,12 @@
 
           const bar = document.createElement("div");
           bar.className = "user-usage-bar";
+          bar.classList.toggle("over-limit", Boolean(user.over_user_limit));
           bar.style.width = "0%";
 
           const value = document.createElement("div");
           value.className = "user-usage-value";
+          value.classList.toggle("over-limit", Boolean(user.over_user_limit));
           value.textContent = user.display || formatTokenNumber(user.tokens || 0);
 
           track.append(bar, value);

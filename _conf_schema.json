@@ -17,6 +17,12 @@
     "hint": "单位为 token。当前统计窗口内群聊总用量到达上限后，根据“用量超限时的措施”停止调用 LLM 或切换到回退模型。",
     "default": 1000000
   },
+  "user_daily_token_limit": {
+    "description": "单个用户每日用量上限",
+    "type": "int",
+    "hint": "单位为 token。仅统计单个群聊内单个用户当前刷新周期的用量；设置为 -1 时不限制单个用户用量。超过上限后静默阻断该用户在该群内发起的 LLM 请求。",
+    "default": -1
+  },
   "over_limit_policy": {
     "description": "用量超限时的措施",
     "type": "object",

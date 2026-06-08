@@ -26,9 +26,11 @@ from astrbot.core.platform.message_type import MessageType
 
 try:
     from .backend.history_stats import HistoryStatsMixin
+    from .backend.user_limits import UserLimitMixin
     from .backend.user_stats import UserStatsMixin
 except ImportError:  # pragma: no cover - compatible with direct module loading.
     from backend.history_stats import HistoryStatsMixin
+    from backend.user_limits import UserLimitMixin
     from backend.user_stats import UserStatsMixin
 
 
@@ -63,6 +65,12 @@ CONFIG_SCHEMA: dict[str, dict[str, Any]] = {
         "type": "int",
         "hint": "单位为 token。当前统计窗口内群聊总用量到达上限后，根据“用量超限时的措施”停止调用 LLM 或切换到回退模型。",
         "default": 1000000,
+    },
+    "user_daily_token_limit": {
+        "description": "单个用户每日用量上限",
+        "type": "int",
+        "hint": "单位为 token。仅统计单个群聊内单个用户当前刷新周期的用量；设置为 -1 时不限制单个用户用量。超过上限后静默阻断该用户在该群内发起的 LLM 请求。",
+        "default": -1,
     },
     "over_limit_policy": {
         "description": "用量超限时的措施",
@@ -219,7 +227,7 @@ def _build_usage_window(refresh_time: Any) -> UsageWindow:
     )
 
 
-class Main(UserStatsMixin, HistoryStatsMixin, Star):
+class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context)
         self.context = context
@@ -1064,6 +1072,14 @@ class Main(UserStatsMixin, HistoryStatsMixin, Star):
                 )
             except (TypeError, ValueError):
                 raise ValueError("单个群聊每日用量上限必须是整数。") from None
+        if "user_daily_token_limit" in raw_config:
+            try:
+                next_config["user_daily_token_limit"] = max(
+                    -1,
+                    int(raw_config["user_daily_token_limit"]),
+                )
+            except (TypeError, ValueError):
+                raise ValueError("单个用户每日用量上限必须是整数。") from None
         if "over_limit_policy" in raw_config:
             next_config["over_limit_policy"] = self._sanitize_over_limit_policy(
                 raw_config["over_limit_policy"]
@@ -1289,6 +1305,8 @@ class Main(UserStatsMixin, HistoryStatsMixin, Star):
     @filter.on_waiting_llm_request(priority=1000)
     async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
         self._remember_user_usage_event(event)
+        if await self._block_user_daily_limit_if_needed(event, "waiting_llm_request"):
+            return
         await self._maybe_sync_history_stats()
         await self._maybe_sync_user_stats()
         limit_context = await self._build_event_limit_context(event)
@@ -1342,6 +1360,8 @@ class Main(UserStatsMixin, HistoryStatsMixin, Star):
             else None
         )
         self._remember_user_usage_event(event, conversation_id=conversation_id)
+        if await self._block_user_daily_limit_if_needed(event, "llm_request"):
+            return
         limit_context = await self._build_event_limit_context(event)
         if not limit_context:
             return
