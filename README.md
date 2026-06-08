@@ -19,9 +19,9 @@
 
 支持**可视化查看**当日 token 用量、限流状态、历史统计数据等。
 
-## 功能
+## 💡 功能
 
-- 按 QQ 群号设置限流列表。
+- 按 QQ 群号设置限流列表，支持为每个群聊单独配置 `备注名` 和 `用量限额`。
 - 按 `用量刷新时间` 切分每日统计窗口，到下一个刷新时间自动重新统计。
 - 支持自定义 token 超限策略：
   - `停止调用 LLM`：群聊原始模型用量达到每日上限后，直接拦截后续 LLM 请求。
@@ -29,16 +29,15 @@
 - 提供 Plugin Page 可视化 WebUI 页面，可查看每个群聊 token 用量进度和限流状态。
 - 支持历史 token 用量统计，可自由选择时间跨度，以 `柱状图` 形式可视化展示每个群聊的用量统计数据。
 
-## 配置项
+## ⚙️ 配置项
+
+#### 基础配置
 
 | 配置项 | 说明 |
 | --- | --- |
 | `enabled` | 是否启用插件。关闭后不拦截 LLM 请求。 |
 | `limited_groups` | 需要限流的 QQ 群号列表。 |
 | `daily_token_limit` | 单个群聊每日原始模型 token 上限，单位为 token。 |
-| `over_limit_policy.action` | 用量超限后的措施，可选 `stop_llm` 或 `fallback_provider`。 |
-| `over_limit_policy.fallback_provider_id` | 回退模型供应商 ID。Plugin Page 会使用当前已加载供应商渲染下拉选择；原生 WebUI 中填写供应商 ID。 |
-| `over_limit_policy.fallback_token_limit` | 回退模型额外 token 上限，单位为 token。 |
 | `refresh_time` | 用量刷新时间，格式 `HH:MM`，按 AstrBot 所在机器本地时区计算。 |
 | `qq_platform_names` | 需要识别为 QQ 平台的适配器名称，默认 `aiocqhttp`、`qq_official`、`qq_official_webhook`。 |
 | `match_unique_session` | 是否兼容 AstrBot `unique_session` 会话隔离下的历史统计。 |
@@ -47,7 +46,16 @@
 
 `block_message` 支持变量：`{group_id}`、`{used}`、`{limit}`、`{refresh_time}`、`{window_start}`、`{window_end}`。
 
-## 超限策略示例
+#### 用量超限策略配置
+
+| 配置项 | 说明 |
+| --- | --- |
+| `处理方式` | 用量超限后的措施，可选 `stop_llm` (停止调用 LLM) 或 `fallback_provider` (回退到其他模型)。 |
+| `回退的模型供应商` | 回退模型供应商 ID。Plugin Page 可直接选择已加载供应商；原生 WebUI 中需要手动填写供应商 ID。 |
+| `回退模型的用量上限` | 原始模型用量超限、切换到回退模型以后，额外还可以再使用的回退模型 token 用量。 |
+| `超限后不再响应唤醒词` | 用量超限后，使用唤醒词不会再触发 bot，以节省回退模型的 token，并避免频繁发送超限提示。 |
+
+## 📓 超限策略示例
 
 假设：
 
@@ -60,7 +68,7 @@
 其他未超限群聊不会被切换，仍使用 AstrBot 默认模型供应商。
 
 
-## 使用方式
+## 🔑 使用方式
 
 1. 将本目录作为插件目录放入 AstrBot 的 `data/plugins/astrbot_plugin_token_limit`。
 2. 在 AstrBot WebUI 的插件管理中加载或重载插件。

@@ -24,7 +24,8 @@
     "default": {
       "action": "stop_llm",
       "fallback_provider_id": "",
-      "fallback_token_limit": 0
+      "fallback_token_limit": 0,
+      "block_wake_words_after_limit": false
     },
     "items": {
       "action": {
@@ -46,6 +47,12 @@
         "type": "int",
         "hint": "单位为 token。选择回退时，硬上限为“每日用量上限 + 回退模型的用量上限”；当前统计窗口内群聊总用量到达硬上限后停止调用。",
         "default": 0
+      },
+      "block_wake_words_after_limit": {
+        "description": "超限后不再响应唤醒词",
+        "type": "bool",
+        "hint": "启用后，群聊当前窗口用量达到“单个群聊每日用量上限”时，使用唤醒词触发 bot 的事件会被阻断；@bot 仍可继续触发，但仍遵守回退模型或停止响应规则。",
+        "default": false
       }
     }
   },

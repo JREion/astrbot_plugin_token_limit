@@ -1,6 +1,6 @@
 # STRUCTURE
 
-本文档记录 v0.5.0 版本的插件结构、内部 API、页面元素映射和主要函数职责。
+本文档记录 v0.5.1 版本的插件结构、内部 API、页面元素映射和主要函数职责。
 
 ## 文件结构
 
@@ -39,7 +39,7 @@ astrbot_plugin_token_limit/
 ### metadata.yaml
 
 - `name`：插件名称，当前为 `astrbot_plugin_token_limit`。
-- `version`：当前版本 `0.5.0`。
+- `version`：当前版本 `0.5.1`。
 - `repo`：插件仓库地址。
 - `support_platforms`：默认支持 `aiocqhttp`、`qq_official`、`qq_official_webhook`。
 - `pages`：声明 `dashboard` Plugin Page，页面文件为 `pages/dashboard/index.html`。
@@ -56,6 +56,7 @@ astrbot_plugin_token_limit/
 | `over_limit_policy.action` | 超限策略：`stop_llm` 或 `fallback_provider`。 |
 | `over_limit_policy.fallback_provider_id` | 回退模型供应商 ID。 |
 | `over_limit_policy.fallback_token_limit` | 回退模型额外 token 上限；硬上限为 `daily_token_limit + fallback_token_limit`。 |
+| `over_limit_policy.block_wake_words_after_limit` | 超过群聊基础每日上限后是否阻断唤醒词触发；`@bot` 仍可继续进入回退或停止响应策略。 |
 | `refresh_time` | 当前窗口刷新时间，按 AstrBot 机器本地时区计算。 |
 | `qq_platform_names` | QQ 平台适配器名称白名单。 |
 | `match_unique_session` | 是否兼容 `unique_session` 形式的 `umo`。 |
@@ -128,7 +129,7 @@ astrbot_plugin_token_limit/
 - `_config_value()`：读取配置，缺省时使用 schema 默认值。
 - `_serialize_config()`：输出完整配置快照。
 - `_sanitize_config()`：校验并标准化所有配置项。
-- `_sanitize_over_limit_policy()`：校验超限策略，回退策略必须填写且能找到供应商。
+- `_sanitize_over_limit_policy()`：校验超限策略，回退策略必须填写且能找到供应商，并保存“超限后不再响应唤醒词”开关。
 - `_normalize_config_list()`：标准化列表型配置。
 
 ### 限流目标识别
@@ -138,6 +139,11 @@ astrbot_plugin_token_limit/
 - `_qq_platform_ids()`：从 AstrBot platform manager 解析平台实例 ID；无法解析时回退平台名称。
 - `_is_enabled()`：判断插件是否启用。
 - `_is_qq_group_event(event)`：判断是否为目标 QQ 平台群聊消息。
+- `_event_get_extra(event, key)`：兼容读取 AstrBot 事件 `extra` 数据，失败时返回空。
+- `_event_truthy_attr(event, name)`：兼容读取事件布尔属性或无参方法。
+- `_event_has_at_bot(event)`：尽量通过事件属性、消息链 At 组件和原始消息判断是否由 `@bot` 触发；识别为 `@bot` 时不会被唤醒词开关阻断。
+- `_is_wake_word_invocation(event)`：在非 `@bot` 触发前提下，识别唤醒词触发事件。
+- `_should_block_wake_word_invocation(event, limit_context)`：当开关启用且群聊用量达到有效基础上限时，判断本次唤醒词触发是否需要阻断。
 - `_umo_candidates_for_group(group_id)`：生成标准 `umo` 候选值。
 - `_unique_session_like_patterns(group_id)`：生成兼容会话隔离的 `LIKE` 匹配规则。
 
@@ -145,7 +151,7 @@ astrbot_plugin_token_limit/
 
 - `_daily_limit()`：读取基础 token 上限。
 - `_daily_limit_for_group(group_id, group_limits=None)`：读取某个群聊的有效基础上限；存在个性化上限时优先使用 `group_limits.json`，否则回退全局 `daily_token_limit`。
-- `_over_limit_policy()`：合并并清洗超限策略。
+- `_over_limit_policy()`：合并并清洗超限策略，包括回退配置和唤醒词阻断开关。
 - `_fallback_provider_id()` / `_fallback_token_limit()`：读取回退供应商和回退额度。
 - `_fallback_provider_exists(provider_id)`：检查供应商存在且支持 `text_chat`。
 - `_provider_options()`：从 `Context.get_all_providers()` 生成回退供应商选项。
@@ -193,10 +199,12 @@ astrbot_plugin_token_limit/
 - `on_waiting_llm_request(event)`：
   - 先调用 `_maybe_sync_history_stats()`，按 5 分钟节流补齐历史统计。
   - 在 AstrBot 选择 provider 之前计算限流状态。
+  - 若 `block_wake_words_after_limit` 启用，且群聊用量已经达到该群有效基础上限，则阻断唤醒词触发事件；`@bot` 触发继续进入后续回退或停止响应策略。
   - 回退区间且回退供应商有效时写入 `event.set_extra("selected_provider", fallback_provider_id)`。
   - 回退供应商失效时不写入，交给 AstrBot 当前可用供应商。
 - `on_llm_request(event, req)`：
   - 复用 `_build_event_limit_context()` 做兜底。
+  - 再次执行唤醒词阻断判断，避免等待 LLM 钩子未生效时漏拦。
   - `normal` 和 `fallback` 放行。
   - `stopped` 时按配置发送 `block_message` 并 `event.stop_event()`。
 
@@ -297,6 +305,7 @@ astrbot_plugin_token_limit/
   - `#saveBtn` / `#cancelBtn` / `#toast`：保存、取消和状态。
 - `#strategyOverlay`：超限策略弹窗。
   - `#strategyForm`：渲染 `over_limit_policy`。
+  - 始终显示“超限后不再响应唤醒词”开关。
   - 仅当 `action=fallback_provider` 时显示回退供应商和回退上限。
 - `#historyOverlay`：历史统计弹窗。
   - `#groupSelect` / `#groupSelectTrigger` / `#groupSelectMenu`：自绘群聊下拉菜单。
@@ -348,6 +357,7 @@ astrbot_plugin_token_limit/
 - 备注显示在群号右侧，格式为 `（备注）`；铅笔图标跟在群号或备注右侧。
 - 用量统计每个群聊的铅笔按钮后方显示齿轮按钮；点击后可保存该群聊个性化每日用量上限。
 - 群聊个性化上限保存后立即影响当前用量进度条、回退/停止状态和 LLM 请求限流判断；其他群聊继续使用全局上限。
+- 开启“超限后不再响应唤醒词”后，群聊用量达到该群有效基础每日上限时，唤醒词触发不再进入 LLM 流程；`@bot` 触发仍会继续执行回退模型或停止响应规则。
 - 配置 textarea 会把保存值中的显式 `\n` 渲染为真实换行。
 - 历史统计群聊下拉菜单中，状态圆点放在每日 token 用量数字前方：绿色正常、黄色回退、红色停止响应。
 - 未选择群聊时，历史图展示历史总 token Top N 群聊。
@@ -362,7 +372,7 @@ astrbot_plugin_token_limit/
 ## 配置与统计同步逻辑
 
 - 当前窗口限流统计使用 `refresh_time` 切分 24 小时窗口。
-- 群聊个性化上限只覆盖基础 `daily_token_limit`；回退模型额外上限仍来自全局 `over_limit_policy.fallback_token_limit`。
+- 群聊个性化上限只覆盖基础 `daily_token_limit`；回退模型额外上限仍来自全局 `over_limit_policy.fallback_token_limit`；唤醒词阻断阈值使用该群最终有效基础上限。
 - 历史统计不依赖 `refresh_time`；它以群号首次加入 `limited_groups` 的时间为起点，按小时桶持久化。
 - 历史同步基于 AstrBot 原生 `ProviderStat`，保存的是每小时绝对桶值，不是累加 delta。
 - 配置保存会强制同步一次历史统计；页面 `usage` 和 LLM 等待钩子会节流同步。

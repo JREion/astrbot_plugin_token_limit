@@ -409,6 +409,16 @@
         border-color: #194fae;
       }
 
+      .action-button:disabled,
+      .action-button:disabled:hover,
+      .action-button:disabled:active {
+        background: #f3f4f6;
+        border-color: #d1d5db;
+        color: #9ca3af;
+        cursor: not-allowed;
+        transform: none;
+      }
+
       .modal-content {
         overflow: auto;
         padding: 4px 18px 18px;
@@ -489,6 +499,13 @@
         color: var(--muted);
         font-size: 12px;
         line-height: 1.45;
+      }
+
+      .group-limit-control {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
       }
 
       .strategy-form {
@@ -1030,16 +1047,21 @@
         <div class="modal-content">
           <div class="group-settings-form">
             <div id="groupSettingsTarget" class="group-settings-target"></div>
-            <label>
-              <div class="config-name">单个群聊每日用量上限</div>
-              <input
-                id="groupLimitInput"
-                class="field"
-                type="number"
-                min="0"
-                step="1"
-              />
-            </label>
+            <div>
+              <div class="config-name">单独配置本群每日用量上限</div>
+              <div class="group-limit-control">
+                <input
+                  id="groupLimitInput"
+                  class="field"
+                  type="number"
+                  min="0"
+                  step="1"
+                />
+                <button id="resetGroupLimitBtn" class="action-button" type="button" disabled>
+                  重置
+                </button>
+              </div>
+            </div>
             <div id="groupSettingsHint" class="group-settings-hint"></div>
             <div id="groupSettingsToast" class="toast"></div>
           </div>
@@ -1065,6 +1087,7 @@
         currentRemarkGroupId: "",
         currentSettingsGroupId: "",
         currentSettingsInitialLimit: null,
+        currentSettingsHasCustomLimit: false,
         history: {
           groups: [],
           selectedGroupId: "",
@@ -1106,6 +1129,7 @@
       const remarkToast = document.getElementById("remarkToast");
       const groupSettingsTarget = document.getElementById("groupSettingsTarget");
       const groupLimitInput = document.getElementById("groupLimitInput");
+      const resetGroupLimitBtn = document.getElementById("resetGroupLimitBtn");
       const groupSettingsHint = document.getElementById("groupSettingsHint");
       const groupSettingsToast = document.getElementById("groupSettingsToast");
       const historyTooltip = document.getElementById("historyTooltip");
@@ -1131,6 +1155,11 @@
       function setGroupSettingsToast(message, isError = false) {
         groupSettingsToast.textContent = message || "";
         groupSettingsToast.classList.toggle("error", Boolean(isError));
+      }
+
+      function setGroupSettingsResetEnabled(enabled) {
+        state.currentSettingsHasCustomLimit = Boolean(enabled);
+        resetGroupLimitBtn.disabled = !state.currentSettingsHasCustomLimit;
       }
 
       function createPencilIcon() {
@@ -1327,6 +1356,12 @@
         appendConfigRow(strategyForm, "action", items.action, state.strategyDraft, () => {
           renderStrategyForm();
         });
+        appendConfigRow(
+          strategyForm,
+          "block_wake_words_after_limit",
+          items.block_wake_words_after_limit,
+          state.strategyDraft,
+        );
         if (state.strategyDraft.action === "fallback_provider") {
           appendConfigRow(
             strategyForm,
@@ -1886,6 +1921,7 @@
           groupLimitInput.value || "0",
           10,
         );
+        setGroupSettingsResetEnabled(group.has_custom_limit);
         groupSettingsHint.textContent = group.has_custom_limit
           ? "当前使用该群聊的个性化上限；保存后不会随全局上限变化。"
           : `当前显示全局上限：${group.global_limit_display || group.primary_limit_display || ""}`;
@@ -1901,6 +1937,7 @@
             groupLimitInput.value || "0",
             10,
           );
+          setGroupSettingsResetEnabled(payload.has_custom_limit);
           groupSettingsHint.textContent = payload.has_custom_limit
             ? "当前使用该群聊的个性化上限；保存后不会随全局上限变化。"
             : `当前显示全局上限：${payload.global_daily_token_limit_display || ""}`;
@@ -1918,6 +1955,7 @@
         groupSettingsOverlay.classList.remove("open");
         state.currentSettingsGroupId = "";
         state.currentSettingsInitialLimit = null;
+        setGroupSettingsResetEnabled(false);
         groupLimitInput.value = "";
         groupSettingsHint.textContent = "";
         setGroupSettingsToast("");
@@ -1990,6 +2028,24 @@
         }
       }
 
+      async function resetGroupSettings() {
+        if (!state.currentSettingsGroupId || !state.currentSettingsHasCustomLimit) {
+          return;
+        }
+
+        try {
+          setGroupSettingsToast("重置中...");
+          await api.apiPost("group-settings", {
+            group_id: state.currentSettingsGroupId,
+            reset: true,
+          });
+          closeGroupSettings();
+          await loadUsage();
+        } catch (error) {
+          setGroupSettingsToast(error.message || String(error), true);
+        }
+      }
+
       document.getElementById("openConfigBtn").addEventListener("click", openConfig);
       document.getElementById("openStrategyBtn").addEventListener("click", openStrategy);
       document.getElementById("openHistoryBtn").addEventListener("click", openHistory);
@@ -2007,6 +2063,7 @@
       document
         .getElementById("saveGroupSettingsBtn")
         .addEventListener("click", saveGroupSettings);
+      resetGroupLimitBtn.addEventListener("click", resetGroupSettings);
       groupSelectTrigger.addEventListener("click", (event) => {
         event.stopPropagation();
         toggleCustomSelect(groupSelect);

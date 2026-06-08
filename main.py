@@ -70,6 +70,7 @@ CONFIG_SCHEMA: dict[str, dict[str, Any]] = {
             "action": OVER_LIMIT_STOP,
             "fallback_provider_id": "",
             "fallback_token_limit": 0,
+            "block_wake_words_after_limit": False,
         },
         "items": {
             "action": {
@@ -91,6 +92,12 @@ CONFIG_SCHEMA: dict[str, dict[str, Any]] = {
                 "type": "int",
                 "hint": "单位为 token。选择回退时，硬上限为“每日用量上限 + 回退模型的用量上限”；当前统计窗口内群聊总用量到达硬上限后停止调用。",
                 "default": 0,
+            },
+            "block_wake_words_after_limit": {
+                "description": "超限后不再响应唤醒词",
+                "type": "bool",
+                "hint": "启用后，群聊当前窗口用量达到“单个群聊每日用量上限”时，使用唤醒词触发 bot 的事件会被阻断；@bot 仍可继续触发，但仍遵守回退模型或停止响应规则。",
+                "default": False,
             },
         },
     },
@@ -444,6 +451,9 @@ class Main(HistoryStatsMixin, Star):
             "action": action,
             "fallback_provider_id": str(policy.get("fallback_provider_id") or "").strip(),
             "fallback_token_limit": fallback_token_limit,
+            "block_wake_words_after_limit": bool(
+                policy.get("block_wake_words_after_limit", False)
+            ),
         }
 
     def _fallback_provider_id(self) -> str:
@@ -463,6 +473,190 @@ class Main(HistoryStatsMixin, Star):
             return False
         provider = get_provider_by_id(provider_id)
         return provider is not None and hasattr(provider, "text_chat")
+
+    @staticmethod
+    def _event_get_extra(event: AstrMessageEvent, key: str) -> Any:
+        get_extra = getattr(event, "get_extra", None)
+        if not callable(get_extra):
+            return None
+        try:
+            return get_extra(key)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _event_truthy_attr(event: AstrMessageEvent, name: str) -> bool | None:
+        value = getattr(event, name, None)
+        if value is None:
+            return None
+        if callable(value):
+            try:
+                return bool(value())
+            except TypeError:
+                return None
+            except Exception:
+                return False
+        return bool(value)
+
+    @staticmethod
+    def _event_self_id(event: AstrMessageEvent) -> str:
+        get_self_id = getattr(event, "get_self_id", None)
+        if callable(get_self_id):
+            try:
+                self_id = str(get_self_id() or "").strip()
+                if self_id:
+                    return self_id
+            except Exception:
+                pass
+
+        self_id = str(getattr(event, "self_id", "") or "").strip()
+        if self_id:
+            return self_id
+
+        message_obj = getattr(event, "message_obj", None)
+        return str(getattr(message_obj, "self_id", "") or "").strip()
+
+    @staticmethod
+    def _message_component_type(item: Any) -> str:
+        item_type = getattr(item, "type", "")
+        item_type_value = getattr(item_type, "value", item_type)
+        item_type_name = getattr(item_type, "name", "")
+        values = {
+            str(item_type_value or "").lower(),
+            str(item_type_name or "").lower(),
+            item.__class__.__name__.lower(),
+        }
+        return "at" if {"at", "componenttype.at"} & values else ""
+
+    @staticmethod
+    def _message_component_targets(item: Any) -> list[str]:
+        targets = []
+        for name in ("qq", "user_id", "id", "target", "uin"):
+            value = getattr(item, name, None)
+            if value is not None:
+                targets.append(str(value).strip())
+
+        for dump_name in ("model_dump", "dict"):
+            dump = getattr(item, dump_name, None)
+            if not callable(dump):
+                continue
+            try:
+                data = dump()
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            for name in ("qq", "user_id", "id", "target", "uin"):
+                value = data.get(name)
+                if value is not None:
+                    targets.append(str(value).strip())
+        return [target for target in targets if target]
+
+    @staticmethod
+    def _iter_message_items(event: AstrMessageEvent) -> list[Any]:
+        candidates = []
+        message_obj = getattr(event, "message_obj", None)
+        if message_obj is not None:
+            candidates.extend(
+                [
+                    getattr(message_obj, "message", None),
+                    getattr(message_obj, "chain", None),
+                ]
+            )
+
+        for getter_name in ("get_messages", "get_message_chain", "get_message"):
+            getter = getattr(event, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                candidates.append(getter())
+            except Exception:
+                continue
+
+        items = []
+        for candidate in candidates:
+            if isinstance(candidate, (list, tuple)):
+                items.extend(candidate)
+            else:
+                chain = getattr(candidate, "chain", None)
+                message = getattr(candidate, "message", None)
+                if isinstance(chain, (list, tuple)):
+                    items.extend(chain)
+                if isinstance(message, (list, tuple)):
+                    items.extend(message)
+        return items
+
+    def _event_has_at_bot(self, event: AstrMessageEvent) -> bool:
+        for name in ("is_at_bot", "is_at_self", "is_at"):
+            value = self._event_truthy_attr(event, name)
+            if value:
+                return True
+
+        self_id = self._event_self_id(event)
+        for item in self._iter_message_items(event):
+            if self._message_component_type(item) != "at":
+                continue
+            targets = self._message_component_targets(item)
+            if not self_id or not targets:
+                return True
+            if any(target == self_id for target in targets):
+                return True
+
+        for getter_name in ("get_message_str", "get_raw_message"):
+            getter = getattr(event, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                text = str(getter() or "")
+            except Exception:
+                continue
+            if "[CQ:at" in text or "<at" in text.lower():
+                return not self_id or self_id in text
+
+        message_obj = getattr(event, "message_obj", None)
+        raw_message = str(getattr(message_obj, "raw_message", "") or "")
+        if "[CQ:at" in raw_message or "<at" in raw_message.lower():
+            return not self_id or self_id in raw_message
+        return False
+
+    def _is_wake_word_invocation(self, event: AstrMessageEvent) -> bool:
+        if self._event_has_at_bot(event):
+            return False
+
+        for key in (
+            "is_wake_command",
+            "wake_command",
+            "wake_word",
+            "wake_prefix_matched",
+            "is_at_or_wake_command",
+        ):
+            extra_value = self._event_get_extra(event, key)
+            if extra_value:
+                return True
+
+        for name in (
+            "is_wake_command",
+            "wake_command",
+            "wake_word",
+            "wake_prefix_matched",
+            "is_at_or_wake_command",
+        ):
+            value = self._event_truthy_attr(event, name)
+            if value:
+                return True
+        return False
+
+    def _should_block_wake_word_invocation(
+        self,
+        event: AstrMessageEvent,
+        limit_context: dict[str, Any],
+    ) -> bool:
+        policy = limit_context["policy"]
+        if not bool(policy.get("block_wake_words_after_limit")):
+            return False
+        limit = int(limit_context["limit"])
+        used = int(limit_context["limit_state"]["used"])
+        return limit > 0 and used >= limit and self._is_wake_word_invocation(event)
 
     def _is_enabled(self) -> bool:
         return bool(self._config_value("enabled"))
@@ -907,6 +1101,9 @@ class Main(HistoryStatsMixin, Star):
             "action": action,
             "fallback_provider_id": fallback_provider_id,
             "fallback_token_limit": fallback_token_limit,
+            "block_wake_words_after_limit": bool(
+                raw_policy.get("block_wake_words_after_limit", False)
+            ),
         }
 
     @staticmethod
@@ -1024,12 +1221,34 @@ class Main(HistoryStatsMixin, Star):
         if not group_id:
             return _error("group_id is required.")
 
+        group_limits = self._load_group_limits()
+        if bool(payload.get("reset")):
+            group_limits.pop(group_id, None)
+            try:
+                self._save_group_limits(group_limits)
+            except ValueError as exc:
+                return _error(str(exc))
+
+            global_limit = self._daily_limit()
+            return _ok(
+                {
+                    "group_id": group_id,
+                    "daily_token_limit": global_limit,
+                    "daily_token_limit_display": _format_tokens(global_limit),
+                    "global_daily_token_limit": global_limit,
+                    "global_daily_token_limit_display": _format_tokens(global_limit),
+                    "has_custom_limit": False,
+                    "custom_daily_token_limit": None,
+                    "custom_daily_token_limit_display": "",
+                    "group_limits": group_limits,
+                }
+            )
+
         try:
             daily_token_limit = max(0, int(payload.get("daily_token_limit") or 0))
         except (TypeError, ValueError):
             return _error("单个群聊每日用量上限必须是整数。")
 
-        group_limits = self._load_group_limits()
         group_limits[group_id] = daily_token_limit
         try:
             self._save_group_limits(group_limits)
@@ -1045,6 +1264,8 @@ class Main(HistoryStatsMixin, Star):
                 "global_daily_token_limit": global_limit,
                 "global_daily_token_limit_display": _format_tokens(global_limit),
                 "has_custom_limit": True,
+                "custom_daily_token_limit": daily_token_limit,
+                "custom_daily_token_limit_display": _format_tokens(daily_token_limit),
                 "group_limits": group_limits,
             }
         )
@@ -1054,6 +1275,16 @@ class Main(HistoryStatsMixin, Star):
         await self._maybe_sync_history_stats()
         limit_context = await self._build_event_limit_context(event)
         if not limit_context:
+            return
+
+        if self._should_block_wake_word_invocation(event, limit_context):
+            event.stop_event()
+            logger.info(
+                "Blocked wake-word invocation after token limit: group=%s used=%s limit=%s",
+                limit_context["group_id"],
+                limit_context["limit_state"]["used"],
+                limit_context["limit"],
+            )
             return
 
         limit_state = limit_context["limit_state"]
@@ -1089,6 +1320,16 @@ class Main(HistoryStatsMixin, Star):
     ) -> None:
         limit_context = await self._build_event_limit_context(event)
         if not limit_context:
+            return
+
+        if self._should_block_wake_word_invocation(event, limit_context):
+            event.stop_event()
+            logger.info(
+                "Blocked wake-word LLM request after token limit: group=%s used=%s limit=%s",
+                limit_context["group_id"],
+                limit_context["limit_state"]["used"],
+                limit_context["limit"],
+            )
             return
 
         group_id = limit_context["group_id"]

@@ -2,6 +2,26 @@
 
 本文档记录每个版本对插件结构、配置、页面和运行逻辑的变动。
 
+## 0.5.1 - 2026-06-08
+
+新增“超限后不再响应唤醒词”策略开关。
+
+- `metadata.yaml`
+  - 版本号更新为 `0.5.1`。
+- `_conf_schema.json`
+  - 在 `over_limit_policy` 默认值和配置项中新增 `block_wake_words_after_limit`，供 AstrBot 原生 WebUI 配置。
+- `main.py`
+  - `CONFIG_SCHEMA.over_limit_policy` 新增布尔配置 `block_wake_words_after_limit`。
+  - `_over_limit_policy()` 和 `_sanitize_over_limit_policy()` 读写并保存该开关。
+  - 新增 `_event_get_extra()`、`_event_truthy_attr()`、`_event_has_at_bot()`、`_is_wake_word_invocation()` 和 `_should_block_wake_word_invocation()`，用于兼容识别 `@bot` 与唤醒词触发方式。
+  - `on_waiting_llm_request()` 在 AstrBot 选择 provider 前执行唤醒词阻断；当群聊当前窗口用量达到该群有效基础上限时，唤醒词触发直接 `event.stop_event()`。
+  - `on_llm_request()` 增加同样的兜底判断；`@bot` 触发不会绕过限流，只会继续进入已有的回退模型或停止响应规则。
+- `pages/dashboard/index.html`
+  - “用量超限策略配置”弹窗新增“超限后不再响应唤醒词”开关。
+  - 该开关始终显示；回退供应商和回退上限仍仅在选择“回退到其他模型”时显示。
+- `STRUCTURE.md`
+  - 更新到 v0.5.1，补充新配置项、事件识别函数、钩子行为和页面元素映射。
+
 ## 0.5.0 - 2026-06-08
 
 新增群聊个性化每日上限配置，并增强历史柱状图点击详情。
