@@ -1,6 +1,6 @@
 # STRUCTURE
 
-本文档记录 v0.5.1 版本的插件结构、内部 API、页面元素映射和主要函数职责。
+本文档记录 v0.6.0 版本的插件结构、内部 API、页面元素映射和主要函数职责。
 
 ## 文件结构
 
@@ -15,7 +15,8 @@ astrbot_plugin_token_limit/
 ├── LICENSE
 ├── backend/
 │   ├── __init__.py
-│   └── history_stats.py
+│   ├── history_stats.py
+│   └── user_stats.py
 └── pages/
     └── dashboard/
         └── index.html
@@ -27,19 +28,21 @@ astrbot_plugin_token_limit/
 <AstrBot plugin data>/astrbot_plugin_token_limit/
 ├── group_remarks.json
 ├── group_limits.json
-└── history_usage.json
+├── history_usage.json
+└── user_usage_48h.json
 ```
 
 - `group_remarks.json`：保存 QQ 群号到备注名的映射，不跟随 `limited_groups` 删除而删除。
 - `group_limits.json`：保存 QQ 群号到个性化每日 token 上限的映射；一旦保存即覆盖全局 `daily_token_limit`，不随后续全局上限变化。
 - `history_usage.json`：保存历史 token 用量，包含每个被追踪群的 `tracked_since`、`last_synced_at`、`total_tokens` 和非零小时桶 `hours`。
+- `user_usage_48h.json`：保存近 48 小时的群内用户 token 用量小时桶和尽量缓存到的 QQ 昵称，超过 48 小时的数据会在同步时丢弃。
 
 ## 元数据与配置
 
 ### metadata.yaml
 
 - `name`：插件名称，当前为 `astrbot_plugin_token_limit`。
-- `version`：当前版本 `0.5.1`。
+- `version`：当前版本 `0.6.0`。
 - `repo`：插件仓库地址。
 - `support_platforms`：默认支持 `aiocqhttp`、`qq_official`、`qq_official_webhook`。
 - `pages`：声明 `dashboard` Plugin Page，页面文件为 `pages/dashboard/index.html`。
@@ -91,20 +94,22 @@ astrbot_plugin_token_limit/
 
 ### Main 初始化
 
-`class Main(HistoryStatsMixin, Star)` 组合历史统计 mixin 和 AstrBot `Star`。
+`class Main(UserStatsMixin, HistoryStatsMixin, Star)` 组合今日用户统计、历史统计 mixin 和 AstrBot `Star`。
 
 `__init__(context, config)`：
 
 - 保存 `Context` 和配置对象。
-- 解析 `group_remarks.json` 与 `history_usage.json` 路径。
+- 解析 `group_remarks.json`、`history_usage.json` 与 `user_usage_48h.json` 路径。
 - 解析 `group_limits.json` 路径。
-- 初始化 `_history_sync_lock`，避免多个请求并发同步同一历史文件。
+- 初始化 `_history_sync_lock` 与 `_user_sync_lock`，避免多个请求并发同步同一持久化统计文件。
 - 调用 `_ensure_history_tracking_for_current_groups()`，让当前配置中的群号在插件启动时开始历史追踪。
+- 调用 `_ensure_user_tracking_for_current_groups()`，让当前配置中的群号在插件启动时建立今日用户统计结构。
 - 注册 Web API：
   - `GET /astrbot_plugin_token_limit/config`
   - `POST /astrbot_plugin_token_limit/config`
   - `GET /astrbot_plugin_token_limit/usage`
   - `GET /astrbot_plugin_token_limit/history`
+  - `GET /astrbot_plugin_token_limit/user-usage`
   - `GET /astrbot_plugin_token_limit/providers`
   - `GET /astrbot_plugin_token_limit/remarks`
   - `POST /astrbot_plugin_token_limit/remarks`
@@ -113,11 +118,11 @@ astrbot_plugin_token_limit/
 
 `initialize()`：
 
-- 插件启用后启动历史统计后台同步任务。
+- 插件启用后启动历史统计与今日用户统计后台同步任务。
 
 `terminate()`：
 
-- 插件禁用或重载时取消历史统计后台同步任务。
+- 插件禁用或重载时取消历史统计与今日用户统计后台同步任务。
 
 ### 配置与备注函数
 
@@ -176,8 +181,9 @@ astrbot_plugin_token_limit/
 | --- | --- | --- |
 | `api_get_config()` | `GET config` | 返回 `{config, schema}`。 |
 | `api_save_config()` | `POST config` | 保存配置并强制同步一次历史统计。 |
-| `api_get_usage()` | `GET usage` | 节流同步历史统计并返回当前窗口用量。 |
+| `api_get_usage()` | `GET usage` | 节流同步历史统计和今日用户统计，并返回当前窗口用量。 |
 | `api_get_history()` | `GET history` | 由 `HistoryStatsMixin` 提供，返回历史下拉菜单和柱状图数据。 |
+| `api_get_user_usage()` | `GET user-usage` | 由 `UserStatsMixin` 提供，返回当前刷新周期内某群 Top N 用户 token 用量排行。 |
 | `api_get_providers()` | `GET providers` | 返回可用回退供应商列表。 |
 | `api_get_remarks()` | `GET remarks` | 返回备注映射。 |
 | `api_save_remark()` | `POST remarks` | 保存或删除备注。 |
@@ -197,7 +203,9 @@ astrbot_plugin_token_limit/
 ### LLM 请求钩子
 
 - `on_waiting_llm_request(event)`：
+  - 先调用 `_remember_user_usage_event()` 尽量缓存群内用户 QQ 昵称。
   - 先调用 `_maybe_sync_history_stats()`，按 5 分钟节流补齐历史统计。
+  - 调用 `_maybe_sync_user_stats()`，按 2 分钟节流补齐近 48 小时用户统计。
   - 在 AstrBot 选择 provider 之前计算限流状态。
   - 若 `block_wake_words_after_limit` 启用，且群聊用量已经达到该群有效基础上限，则阻断唤醒词触发事件；`@bot` 触发继续进入后续回退或停止响应策略。
   - 回退区间且回退供应商有效时写入 `event.set_extra("selected_provider", fallback_provider_id)`。
@@ -275,6 +283,54 @@ astrbot_plugin_token_limit/
 - `_history_hour_values()` / `_history_iter_hours()`：遍历规范化小时桶。
 - `_history_bar()`：统一柱状图数据结构，可为近 24 小时和近一个月柱顶数值指定 1 位小数显示。
 
+## backend/user_stats.py
+
+`UserStatsMixin` 独立维护近 48 小时群内用户 token 用量统计，用于 Plugin Page 的“今日用户 token 用量统计”弹窗。
+
+### 常量与数据结构
+
+- `USER_USAGE_STATS_FILE`：持久化文件名 `user_usage_48h.json`。
+- `USER_USAGE_RETENTION`：用户小时桶保留时间，当前 48 小时。
+- `USER_USAGE_REQUEST_RETENTION`：用户请求归因快照保留时间，当前 48 小时。
+- `USER_USAGE_REQUEST_LOOKBACK`：把 ProviderStat 记录回配到最近一次用户请求的最大回看时间，当前 10 分钟。
+- `USER_USAGE_REQUEST_FUTURE_TOLERANCE`：允许事件记录时间略晚于 provider `start_time` 的容差，当前 5 秒。
+- `USER_USAGE_SYNC_OVERLAP`：同步回看窗口，当前 2 小时，用于修正 AstrBot 延迟写入。
+- `USER_USAGE_SYNC_MIN_INTERVAL`：非强制同步最短间隔，当前 2 分钟。
+- `USER_USAGE_BACKGROUND_SYNC_INTERVAL`：后台同步间隔，当前 3600 秒。
+- `USER_USAGE_DEFAULT_TOP_LIMIT`：默认展示 Top N，当前 10。
+- `UserUsageWindow`：今日用户统计查询窗口，按 `refresh_time` 生成当前 24 小时统计周期。
+
+### 模块级工具函数
+
+- `_normalize_user_group_id()` / `_sanitize_user_id()`：标准化群号和用户号。
+- `_sanitize_user_name()`：清洗 QQ 昵称或群名片。
+- `_format_user_tokens()`：格式化 token 数为 `K` / `M`。
+- `_build_user_usage_window()`：按 `refresh_time` 生成当前刷新周期窗口。
+- `_extract_user_id_from_umo(umo, group_id)`：从 AstrBot `ProviderStat.umo` 中解析群内用户 ID；支持常见 `用户ID_群号`、`群号_用户ID` 以及带冒号的平台会话格式。
+- `_timestamp_to_utc()`：将 AstrBot provider 统计中的 Unix 秒级 `start_time` 转为 UTC 时间，用于请求归因。
+
+### Mixin 函数
+
+- `_resolve_user_stats_path()`：与备注文件同目录存放 `user_usage_48h.json`。
+- `_load_user_stats()` / `_save_user_stats()`：读写近 48 小时用户统计 JSON。
+- `_sanitize_user_stats()`：清洗历史文件，丢弃超过 48 小时的小时桶和请求归因快照。
+- `_ensure_user_tracking_for_current_groups(data=None)`：为当前 `limited_groups` 建立用户统计群结构。
+- `_start_user_background_sync()` / `_stop_user_background_sync()`：在插件启停时管理用户统计后台任务。
+- `_maybe_sync_user_stats(force=False, group_id=None)`：带锁同步用户统计；非强制同步按 2 分钟节流，打开用户统计弹窗时可按群强制同步。
+- `_sync_user_group(group_id, group_data, now)`：查询 AstrBot `ProviderStat`，结合请求归因队列覆盖最近同步窗口内的用户小时桶。
+- `_assign_user_usage_records()` / `_match_user_usage_request()`：将 `umo` 只能定位到群会话的 ProviderStat 明细按同 `umo`、同会话 ID（如有）和最近请求时间回配到群内用户 LLM 请求；群聊共用 `conversation_id` 时不会只按会话 ID 合并。
+- `_merge_user_hours()`：合并可直接从 `umo` 解析出的小时桶和请求归因得到的小时桶。
+- `_prune_user_group_data()`：删除超过 48 小时或即将被重新查询窗口覆盖的旧桶。
+- `_prune_user_usage_requests()`：清理超过 48 小时或非法的请求归因快照。
+- `_query_hourly_user_usage_for_group()`：查询某群在时间段内的 ProviderStat，返回可直接按用户聚合的小时桶和需要归因的记录明细。
+- `_query_user_totals_for_group()`：查询当前刷新周期内某群按用户聚合的 token 总量。
+- `_stored_user_totals_for_group()` / `_combine_user_totals()`：将实时 ProviderStat 直接聚合结果和持久化归因小时桶合并为当前窗口排行数据。
+- `_remember_user_usage_event(event, conversation_id=None)`：在 LLM 等待钩子和 LLM 请求钩子里尽量从消息事件缓存用户 QQ 昵称，并记录请求归因快照；LLM 请求阶段会补充 `conversation_id`。
+- `_event_user_id()` / `_event_user_name()`：兼容不同 AstrBot 事件字段读取用户号与昵称。
+- `api_get_user_usage()`：返回群聊下拉菜单、当前窗口、同步时间，以及选中群的用户 Top N 横向柱状图数据。
+- `_user_usage_dropdown_groups()`：复用当前用量状态生成用户统计弹窗的群聊下拉菜单。
+- `_user_usage_rows()`：将用户 token 总量转为前端排行行，过滤 0 用量用户，昵称缺失时显示 QQ 号。
+
 ## pages/dashboard/index.html
 
 ### 页面结构
@@ -296,6 +352,7 @@ astrbot_plugin_token_limit/
   - `#openConfigBtn`：打开插件基础配置，位于功能按钮区最上方。
   - `#openStrategyBtn`：打开“用量超限策略配置”。
   - `#openHistoryBtn`：打开“历史 token 用量统计”。
+  - `#openUserUsageBtn`：打开“今日用户 token 用量统计”。
   - `#statusLine`：插件启用状态。
 
 ### 弹窗元素
@@ -315,6 +372,12 @@ astrbot_plugin_token_limit/
   - `#historyChart`：柱状图容器。
   - `#historyXAxis`：动态横轴标签。
   - `#historyFooter`：最后同步时间。
+- `#userUsageOverlay`：今日用户 token 用量统计弹窗。
+  - `#userGroupSelect` / `#userGroupSelectTrigger` / `#userGroupSelectMenu`：自绘群聊下拉菜单，行为与历史统计群聊下拉一致。
+  - `#refreshUserUsageBtn`：刷新按钮，保持当前群聊选择并重新请求今日用户 token 用量。
+  - `#userUsageWindow`：当前刷新周期窗口文本。
+  - `#userUsageChart`：横向柱状图容器，展示选中群聊内 Top N 用户 token 用量。
+  - `#userUsageFooter`：最后同步时间。
 - `#remarkOverlay`：备注编辑弹窗。
   - `#remarkTarget`、`#remarkInput`、`#saveRemarkBtn`、`#cancelRemarkBtn`、`#remarkToast`。
 - `#groupSettingsOverlay`：群聊个性化配置弹窗。
@@ -347,7 +410,13 @@ astrbot_plugin_token_limit/
   - `showHistoryTooltip()` / `hideHistoryTooltip()`：点击柱状图柱子时，在鼠标位置显示/隐藏完整内容气泡。
   - `renderHistoryChart()`：渲染动态轴、数值标签和柱状图动画。
   - `formatTokenNumber()`：前端轴标签格式化。
-- 弹窗：`openConfig()`、`closeConfig()`、`openStrategy()`、`closeStrategy()`、`openHistory()`、`closeHistory()`、`openRemark()`、`closeRemark()`、`openGroupSettings()`、`closeGroupSettings()`。
+- 今日用户统计：
+  - `selectedUserUsageGroup()`：读取当前选中的用户统计群聊。
+  - `renderUserUsageControls()`：渲染群聊下拉菜单。
+  - `renderUserUsageWindow()`：渲染当前刷新周期时间窗口。
+  - `renderUserUsageChart()`：渲染横向柱状图；未选择群聊时显示操作提示。
+  - `loadUserUsage()` / `reloadUserUsage()`：请求 `user-usage` API。
+- 弹窗：`openConfig()`、`closeConfig()`、`openStrategy()`、`closeStrategy()`、`openHistory()`、`closeHistory()`、`openUserUsage()`、`closeUserUsage()`、`openRemark()`、`closeRemark()`、`openGroupSettings()`、`closeGroupSettings()`。
 - 保存：`saveConfig()`、`saveStrategy()`、`saveRemark()`、`saveGroupSettings()`。
 - `init()`：等待 bridge ready 后加载配置和当前用量。
 
@@ -368,6 +437,9 @@ astrbot_plugin_token_limit/
 - 选中群聊后，两个下拉菜单右侧显示所选时间跨度内该群 token 用量总和。
 - 点击历史柱状图中的任一柱子会显示气泡 tag，第一行为横坐标，第二行为 token 用量值；文本强制完整显示，宽度随最长文本行自适应。
 - 柱状图切换数据时通过高度过渡动画平滑变化；横纵坐标和柱顶数值由数据动态生成。
+- 今日用户 token 用量统计弹窗默认显示“选择群聊 ...”和操作提示；选中群聊后展示当前刷新周期内 token 消耗最高的 Top N 用户。
+- 今日用户统计使用横向柱状图，纵向标签为 QQ 昵称；无法获取昵称时显示 QQ 号；消耗量为 0 的用户不显示。柱子按最长纵坐标文字统一确定左侧起点，紧贴标签右侧对齐。
+- 今日用户统计弹窗每次打开、选择群聊或点击“刷新”都会重新请求后端；后端会强制同步选中群聊的 ProviderStat 和请求归因数据。
 
 ## 配置与统计同步逻辑
 
@@ -375,5 +447,7 @@ astrbot_plugin_token_limit/
 - 群聊个性化上限只覆盖基础 `daily_token_limit`；回退模型额外上限仍来自全局 `over_limit_policy.fallback_token_limit`；唤醒词阻断阈值使用该群最终有效基础上限。
 - 历史统计不依赖 `refresh_time`；它以群号首次加入 `limited_groups` 的时间为起点，按小时桶持久化。
 - 历史同步基于 AstrBot 原生 `ProviderStat`，保存的是每小时绝对桶值，不是累加 delta。
+- 今日用户统计也基于 AstrBot 原生 `ProviderStat`；持久化文件保留近 48 小时群内用户小时桶、请求归因快照和昵称缓存，不跨群合并同一个用户。
 - 配置保存会强制同步一次历史统计；页面 `usage` 和 LLM 等待钩子会节流同步。
+- 配置保存会强制同步一次今日用户统计；页面 `usage` 和 LLM 等待钩子会节流同步，打开用户统计弹窗时会按选中群强制同步。
 - 旧群号不会因为从 `limited_groups` 移除而从 `history_usage.json` 删除，因此再次加入时历史总量和趋势可以继续显示。

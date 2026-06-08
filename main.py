@@ -26,8 +26,10 @@ from astrbot.core.platform.message_type import MessageType
 
 try:
     from .backend.history_stats import HistoryStatsMixin
+    from .backend.user_stats import UserStatsMixin
 except ImportError:  # pragma: no cover - compatible with direct module loading.
     from backend.history_stats import HistoryStatsMixin
+    from backend.user_stats import UserStatsMixin
 
 
 PLUGIN_NAME = "astrbot_plugin_token_limit"
@@ -217,7 +219,7 @@ def _build_usage_window(refresh_time: Any) -> UsageWindow:
     )
 
 
-class Main(HistoryStatsMixin, Star):
+class Main(UserStatsMixin, HistoryStatsMixin, Star):
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context)
         self.context = context
@@ -225,9 +227,13 @@ class Main(HistoryStatsMixin, Star):
         self.group_remarks_path = self._resolve_group_remarks_path()
         self.group_limits_path = self._resolve_group_limits_path()
         self.history_stats_path = self._resolve_history_stats_path()
+        self.user_stats_path = self._resolve_user_stats_path()
         self._history_last_sync_attempt: datetime | None = None
         self._history_sync_lock = asyncio.Lock()
+        self._user_last_sync_attempts: dict[str, datetime] = {}
+        self._user_sync_lock = asyncio.Lock()
         self._ensure_history_tracking_for_current_groups()
+        self._ensure_user_tracking_for_current_groups()
         self.context.register_web_api(
             f"/{PLUGIN_NAME}/config",
             self.api_get_config,
@@ -251,6 +257,12 @@ class Main(HistoryStatsMixin, Star):
             self.api_get_history,
             ["GET"],
             "获取 QQ 群 token 历史用量统计",
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/user-usage",
+            self.api_get_user_usage,
+            ["GET"],
+            "获取 QQ 群今日用户 token 用量统计",
         )
         self.context.register_web_api(
             f"/{PLUGIN_NAME}/providers",
@@ -286,9 +298,11 @@ class Main(HistoryStatsMixin, Star):
 
     async def initialize(self) -> None:
         self._start_history_background_sync()
+        self._start_user_background_sync()
 
     async def terminate(self) -> None:
         await self._stop_history_background_sync()
+        await self._stop_user_background_sync()
 
     def _resolve_group_remarks_path(self) -> Path:
         if StarTools is not None:
@@ -1142,6 +1156,7 @@ class Main(HistoryStatsMixin, Star):
         if callable(save_config):
             save_config()
         await self._maybe_sync_history_stats(force=True)
+        await self._maybe_sync_user_stats(force=True)
         return _ok(
             {
                 "config": self._serialize_config(),
@@ -1152,6 +1167,7 @@ class Main(HistoryStatsMixin, Star):
     async def api_get_usage(self) -> dict:
         try:
             await self._maybe_sync_history_stats()
+            await self._maybe_sync_user_stats()
             return _ok(await self._build_usage_payload())
         except Exception as exc:
             logger.error("获取 QQ 群 token 用量失败: %s", exc, exc_info=True)
@@ -1272,7 +1288,9 @@ class Main(HistoryStatsMixin, Star):
 
     @filter.on_waiting_llm_request(priority=1000)
     async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
+        self._remember_user_usage_event(event)
         await self._maybe_sync_history_stats()
+        await self._maybe_sync_user_stats()
         limit_context = await self._build_event_limit_context(event)
         if not limit_context:
             return
@@ -1318,6 +1336,12 @@ class Main(HistoryStatsMixin, Star):
         event: AstrMessageEvent,
         req: ProviderRequest,
     ) -> None:
+        conversation_id = (
+            req.conversation.cid
+            if getattr(req, "conversation", None) is not None
+            else None
+        )
+        self._remember_user_usage_event(event, conversation_id=conversation_id)
         limit_context = await self._build_event_limit_context(event)
         if not limit_context:
             return

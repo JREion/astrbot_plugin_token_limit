@@ -812,6 +812,89 @@
         font-size: 12px;
       }
 
+      .user-usage-toolbar {
+        display: grid;
+        grid-template-columns: minmax(260px, 1fr) auto minmax(220px, 0.7fr);
+        gap: 12px;
+        align-items: center;
+      }
+
+      .user-usage-refresh {
+        min-height: 40px;
+        padding: 9px 16px;
+        white-space: nowrap;
+      }
+
+      .user-usage-window {
+        min-width: 0;
+        color: var(--muted);
+        font-size: 13px;
+        text-align: right;
+      }
+
+      .user-usage-chart-shell {
+        min-height: 380px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px;
+        background: #fff;
+      }
+
+      .user-usage-chart {
+        min-height: 330px;
+        display: grid;
+        gap: 12px;
+        align-content: start;
+      }
+
+      .user-usage-row {
+        display: grid;
+        grid-template-columns: max-content minmax(0, 1fr);
+        column-gap: 8px;
+        align-items: center;
+      }
+
+      .user-usage-label {
+        width: var(--user-usage-label-width, max-content);
+        max-width: 220px;
+        overflow: hidden;
+        color: var(--text);
+        font-size: 13px;
+        font-weight: 700;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .user-usage-bar-track {
+        min-width: 0;
+        height: 28px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .user-usage-bar {
+        height: 16px;
+        width: 0%;
+        border-radius: 8px;
+        background: var(--blue);
+        transition:
+          width 320ms ease,
+          background 150ms ease;
+      }
+
+      .user-usage-bar:hover {
+        background: #1f5fcf;
+      }
+
+      .user-usage-value {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
       .history-tooltip {
         position: fixed;
         z-index: 60;
@@ -876,8 +959,19 @@
 
         .layout,
         .config-row,
-        .history-toolbar {
+        .history-toolbar,
+        .user-usage-toolbar,
+        .user-usage-row {
           grid-template-columns: 1fr;
+        }
+
+        .user-usage-window {
+          text-align: left;
+        }
+
+        .user-usage-label {
+          width: auto;
+          max-width: none;
         }
 
         .modal {
@@ -921,6 +1015,9 @@
             </button>
             <button id="openHistoryBtn" class="strategy-button" type="button">
               历史 token 用量统计
+            </button>
+            <button id="openUserUsageBtn" class="strategy-button" type="button">
+              今日用户 token 用量统计
             </button>
             <div id="statusLine" class="status-line"></div>
           </div>
@@ -1000,6 +1097,42 @@
             <div id="historyXAxis" class="history-x-axis"></div>
           </div>
           <div id="historyFooter" class="history-footer"></div>
+        </div>
+      </section>
+    </div>
+
+    <div id="userUsageOverlay" class="overlay" role="dialog" aria-modal="true">
+      <section class="modal history-modal">
+        <div class="modal-topbar">
+          <div class="modal-title">今日用户 token 用量统计</div>
+          <div class="modal-actions">
+            <button id="cancelUserUsageBtn" class="action-button" type="button">关闭</button>
+          </div>
+        </div>
+        <div class="modal-content history-content">
+          <div class="user-usage-toolbar">
+            <div id="userGroupSelect" class="custom-select">
+              <button id="userGroupSelectTrigger" class="select-trigger" type="button">
+                <span id="userGroupSelectLabel" class="select-label">选择群聊 ...</span>
+                <span class="select-arrow">▼</span>
+              </button>
+              <div id="userGroupSelectMenu" class="select-menu"></div>
+            </div>
+            <button
+              id="refreshUserUsageBtn"
+              class="action-button user-usage-refresh"
+              type="button"
+            >
+              刷新
+            </button>
+            <div id="userUsageWindow" class="user-usage-window"></div>
+          </div>
+          <div class="user-usage-chart-shell">
+            <div id="userUsageChart" class="user-usage-chart">
+              <div class="history-empty">请选择群聊查看今日用户 token 用量</div>
+            </div>
+          </div>
+          <div id="userUsageFooter" class="history-footer"></div>
         </div>
       </section>
     </div>
@@ -1097,6 +1230,13 @@
           rangeTotalTokens: 0,
           syncedAt: "",
         },
+        userUsage: {
+          groups: [],
+          selectedGroupId: "",
+          users: [],
+          window: null,
+          syncedAt: "",
+        },
       };
 
       const usageList = document.getElementById("usageList");
@@ -1105,6 +1245,7 @@
       const overlay = document.getElementById("overlay");
       const strategyOverlay = document.getElementById("strategyOverlay");
       const historyOverlay = document.getElementById("historyOverlay");
+      const userUsageOverlay = document.getElementById("userUsageOverlay");
       const remarkOverlay = document.getElementById("remarkOverlay");
       const groupSettingsOverlay = document.getElementById("groupSettingsOverlay");
       const configForm = document.getElementById("configForm");
@@ -1124,6 +1265,14 @@
       const historyChart = document.getElementById("historyChart");
       const historyXAxis = document.getElementById("historyXAxis");
       const historyFooter = document.getElementById("historyFooter");
+      const userGroupSelect = document.getElementById("userGroupSelect");
+      const userGroupSelectTrigger = document.getElementById("userGroupSelectTrigger");
+      const userGroupSelectLabel = document.getElementById("userGroupSelectLabel");
+      const userGroupSelectMenu = document.getElementById("userGroupSelectMenu");
+      const refreshUserUsageBtn = document.getElementById("refreshUserUsageBtn");
+      const userUsageWindow = document.getElementById("userUsageWindow");
+      const userUsageChart = document.getElementById("userUsageChart");
+      const userUsageFooter = document.getElementById("userUsageFooter");
       const remarkInput = document.getElementById("remarkInput");
       const remarkTarget = document.getElementById("remarkTarget");
       const remarkToast = document.getElementById("remarkToast");
@@ -1499,7 +1648,7 @@
       }
 
       function closeCustomSelects(except = null) {
-        [groupSelect, rangeSelect].forEach((item) => {
+        [groupSelect, rangeSelect, userGroupSelect].forEach((item) => {
           if (item && item !== except) item.classList.remove("open");
         });
       }
@@ -1519,6 +1668,12 @@
       function selectedHistoryGroup() {
         return state.history.groups.find(
           (group) => group.group_id === state.history.selectedGroupId,
+        );
+      }
+
+      function selectedUserUsageGroup() {
+        return state.userUsage.groups.find(
+          (group) => group.group_id === state.userUsage.selectedGroupId,
         );
       }
 
@@ -1609,6 +1764,160 @@
           });
           rangeSelectMenu.append(option);
         });
+      }
+
+      function renderUserUsageControls() {
+        const selectedGroup = selectedUserUsageGroup();
+        userGroupSelectLabel.textContent = selectedGroup
+          ? `${selectedGroup.group_id}${selectedGroup.remark ? `（${selectedGroup.remark}）` : ""}`
+          : "选择群聊 ...";
+
+        userGroupSelectMenu.innerHTML = "";
+        const placeholder = document.createElement("button");
+        placeholder.className = `select-option${
+          state.userUsage.selectedGroupId ? "" : " selected"
+        }`;
+        placeholder.type = "button";
+        placeholder.textContent = "选择群聊 ...";
+        placeholder.addEventListener("click", async () => {
+          state.userUsage.selectedGroupId = "";
+          closeCustomSelects();
+          await reloadUserUsage();
+        });
+        userGroupSelectMenu.append(placeholder);
+
+        state.userUsage.groups.forEach((group) => {
+          const option = document.createElement("button");
+          option.className = `select-option${
+            group.group_id === state.userUsage.selectedGroupId ? " selected" : ""
+          }`;
+          option.type = "button";
+
+          const content = document.createElement("span");
+          content.className = "select-option-main";
+
+          const id = document.createElement("span");
+          id.className = "select-option-id";
+          id.textContent = `${group.group_id}${group.remark ? `（${group.remark}）` : ""}`;
+
+          const usageWrap = document.createElement("span");
+          usageWrap.className = "select-option-usage-wrap";
+
+          const dot = document.createElement("span");
+          dot.className = statusDotClass(group.status);
+
+          const usage = document.createElement("span");
+          usage.className = "select-option-usage";
+          usage.textContent = group.daily_display || "0";
+
+          usageWrap.append(dot, usage);
+          content.append(id, usageWrap);
+          option.append(content);
+          option.addEventListener("click", async () => {
+            state.userUsage.selectedGroupId = group.group_id;
+            closeCustomSelects();
+            await reloadUserUsage();
+          });
+          userGroupSelectMenu.append(option);
+        });
+      }
+
+      function renderUserUsageWindow() {
+        const windowInfo = state.userUsage.window;
+        userUsageWindow.textContent = windowInfo
+          ? `${formatDate(windowInfo.start)} - ${formatDate(windowInfo.end)}`
+          : "";
+      }
+
+      function renderUserUsageChart() {
+        userUsageChart.innerHTML = "";
+        userUsageChart.style.removeProperty("--user-usage-label-width");
+        if (!state.userUsage.selectedGroupId) {
+          const empty = document.createElement("div");
+          empty.className = "history-empty";
+          empty.textContent = "请选择群聊查看今日用户 token 用量";
+          userUsageChart.append(empty);
+          userUsageFooter.textContent = "";
+          return;
+        }
+
+        const users = state.userUsage.users || [];
+        if (!users.length) {
+          const empty = document.createElement("div");
+          empty.className = "history-empty";
+          empty.textContent = "当前统计周期内暂无用户 token 用量";
+          userUsageChart.append(empty);
+          userUsageFooter.textContent = state.userUsage.syncedAt
+            ? `最后同步：${formatDate(state.userUsage.syncedAt)}`
+            : "";
+          return;
+        }
+
+        const maxValue = Math.max(...users.map((user) => Number(user.tokens || 0)), 1);
+        const labelWidth = measureUserUsageLabelWidth(users);
+        if (labelWidth > 0) {
+          userUsageChart.style.setProperty(
+            "--user-usage-label-width",
+            `${Math.min(labelWidth, 220)}px`,
+          );
+        }
+        users.forEach((user) => {
+          const row = document.createElement("div");
+          row.className = "user-usage-row";
+
+          const label = document.createElement("div");
+          label.className = "user-usage-label";
+          label.textContent = user.label || user.user_id || "";
+          label.title = user.user_id
+            ? `${label.textContent}（${user.user_id}）`
+            : label.textContent;
+
+          const track = document.createElement("div");
+          track.className = "user-usage-bar-track";
+
+          const bar = document.createElement("div");
+          bar.className = "user-usage-bar";
+          bar.style.width = "0%";
+
+          const value = document.createElement("div");
+          value.className = "user-usage-value";
+          value.textContent = user.display || formatTokenNumber(user.tokens || 0);
+
+          track.append(bar, value);
+          row.append(label, track);
+          userUsageChart.append(row);
+
+          window.requestAnimationFrame(() => {
+            const width = Math.max(
+              2,
+              Math.round((Number(user.tokens || 0) / maxValue) * 100),
+            );
+            bar.style.width = `${width}%`;
+          });
+        });
+
+        userUsageFooter.textContent = state.userUsage.syncedAt
+          ? `最后同步：${formatDate(state.userUsage.syncedAt)}`
+          : "";
+      }
+
+      function measureUserUsageLabelWidth(users) {
+        if (!users.length) return 0;
+        const sample = document.createElement("span");
+        sample.className = "user-usage-label";
+        sample.style.position = "fixed";
+        sample.style.visibility = "hidden";
+        sample.style.width = "auto";
+        sample.style.maxWidth = "none";
+        sample.style.pointerEvents = "none";
+        document.body.append(sample);
+        let maxWidth = 0;
+        users.forEach((user) => {
+          sample.textContent = user.label || user.user_id || "";
+          maxWidth = Math.max(maxWidth, sample.getBoundingClientRect().width);
+        });
+        sample.remove();
+        return Math.ceil(maxWidth);
       }
 
       function renderHistoryTotal() {
@@ -1816,6 +2125,37 @@
         renderHistoryChart();
       }
 
+      async function loadUserUsage() {
+        const params = {};
+        if (state.userUsage.selectedGroupId) {
+          params.group_id = state.userUsage.selectedGroupId;
+        }
+        const payload = await api.apiGet("user-usage", params);
+        state.userUsage.groups = payload.groups || [];
+        state.userUsage.selectedGroupId = payload.selected_group_id || "";
+        state.userUsage.users = payload.users || [];
+        state.userUsage.window = payload.window || null;
+        state.userUsage.syncedAt = payload.synced_at || "";
+        renderUserUsageControls();
+        renderUserUsageWindow();
+        renderUserUsageChart();
+      }
+
+      async function reloadUserUsage() {
+        userUsageChart.innerHTML = '<div class="history-empty">加载中...</div>';
+        userUsageFooter.textContent = "";
+        refreshUserUsageBtn.disabled = true;
+        try {
+          await loadUserUsage();
+        } catch (error) {
+          userUsageChart.innerHTML = `<div class="history-empty">${
+            error.message || error
+          }</div>`;
+        } finally {
+          refreshUserUsageBtn.disabled = false;
+        }
+      }
+
       async function loadConfig() {
         const payload = await api.apiGet("config");
         state.config = payload.config || {};
@@ -1877,6 +2217,23 @@
         historyOverlay.classList.remove("open");
         closeCustomSelects();
         hideHistoryTooltip();
+      }
+
+      async function openUserUsage() {
+        state.userUsage.selectedGroupId = "";
+        state.userUsage.users = [];
+        state.userUsage.window = null;
+        state.userUsage.syncedAt = "";
+        renderUserUsageControls();
+        renderUserUsageWindow();
+        renderUserUsageChart();
+        userUsageOverlay.classList.add("open");
+        await reloadUserUsage();
+      }
+
+      function closeUserUsage() {
+        userUsageOverlay.classList.remove("open");
+        closeCustomSelects();
       }
 
       function handleHistoryResize() {
@@ -2049,12 +2406,17 @@
       document.getElementById("openConfigBtn").addEventListener("click", openConfig);
       document.getElementById("openStrategyBtn").addEventListener("click", openStrategy);
       document.getElementById("openHistoryBtn").addEventListener("click", openHistory);
+      document.getElementById("openUserUsageBtn").addEventListener("click", openUserUsage);
       document.getElementById("cancelBtn").addEventListener("click", closeConfig);
       document.getElementById("saveBtn").addEventListener("click", saveConfig);
       document.getElementById("refreshBtn").addEventListener("click", loadUsage);
       document.getElementById("cancelStrategyBtn").addEventListener("click", closeStrategy);
       document.getElementById("saveStrategyBtn").addEventListener("click", saveStrategy);
       document.getElementById("cancelHistoryBtn").addEventListener("click", closeHistory);
+      document
+        .getElementById("cancelUserUsageBtn")
+        .addEventListener("click", closeUserUsage);
+      refreshUserUsageBtn.addEventListener("click", reloadUserUsage);
       document.getElementById("cancelRemarkBtn").addEventListener("click", closeRemark);
       document.getElementById("saveRemarkBtn").addEventListener("click", saveRemark);
       document
@@ -2078,6 +2440,13 @@
       rangeSelectMenu.addEventListener("click", (event) => {
         event.stopPropagation();
       });
+      userGroupSelectTrigger.addEventListener("click", (event) => {
+        event.stopPropagation();
+        toggleCustomSelect(userGroupSelect);
+      });
+      userGroupSelectMenu.addEventListener("click", (event) => {
+        event.stopPropagation();
+      });
       document.addEventListener("click", () => {
         closeCustomSelects();
         hideHistoryTooltip();
@@ -2091,6 +2460,9 @@
       });
       historyOverlay.addEventListener("click", (event) => {
         if (event.target === historyOverlay) closeHistory();
+      });
+      userUsageOverlay.addEventListener("click", (event) => {
+        if (event.target === userUsageOverlay) closeUserUsage();
       });
       remarkOverlay.addEventListener("click", (event) => {
         if (event.target === remarkOverlay) closeRemark();

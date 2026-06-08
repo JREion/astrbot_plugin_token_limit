@@ -2,6 +2,38 @@
 
 本文档记录每个版本对插件结构、配置、页面和运行逻辑的变动。
 
+## 0.6.0 - 2026-06-08
+
+新增“今日用户 token 用量统计”能力。
+
+- `metadata.yaml`
+  - 版本号更新为 `0.6.0`。
+- `backend/user_stats.py`
+  - 新增 `UserStatsMixin`，按 mixin 方式承载群内用户用量统计逻辑。
+  - 新增持久化文件 `user_usage_48h.json`，保存近 48 小时的群内用户 token 小时桶、请求归因队列和尽量缓存到的 QQ 昵称。
+  - 新增 `_query_hourly_user_usage_for_group()` 与 `_query_user_totals_for_group()`，基于 AstrBot 原生 `ProviderStat` 按用户聚合 token 用量。
+  - 新增 `_extract_user_id_from_umo()`，从常见 `umo` / `unique_session` 形式中解析群内用户 ID；用户统计只在单群内计算，不跨群合并。
+  - 新增 `_remember_user_usage_event()`，在 LLM 等待钩子和 LLM 请求钩子中尽量缓存用户昵称、请求归因快照和会话 ID；当 `ProviderStat.umo` 只有群会话 ID 时，刷新统计会按 provider `start_time` 回配到最近的群内用户请求，避免把整个群的用量混到单个用户。
+  - 新增 `api_get_user_usage()`，返回群聊下拉菜单、当前刷新周期窗口和选中群的 Top N 用户横向柱状图数据。
+- `main.py`
+  - 引入 `UserStatsMixin`，`Main` 继承改为 `class Main(UserStatsMixin, HistoryStatsMixin, Star)`。
+  - 初始化 `user_stats_path`、`_user_sync_lock` 与用户统计缓存结构。
+  - 注册 `GET /astrbot_plugin_token_limit/user-usage` Web API。
+  - 插件启停时同步启动/停止今日用户统计后台任务。
+  - 保存配置、页面用量刷新和 LLM 等待钩子中加入用户统计同步；LLM 等待钩子会先缓存用户昵称，LLM 请求钩子会补充会话 ID 用于精确归因。
+- `pages/dashboard/index.html`
+  - “插件功能”中新增蓝色“今日用户 token 用量统计”按钮，位于“历史 token 用量统计”下方。
+  - 新增 `#userUsageOverlay` 悬浮窗口。
+  - 新增与历史统计相同交互风格的群聊自绘下拉菜单。
+  - 新增“刷新”按钮；打开弹窗、选择群聊和点击刷新都会重新请求当前用户 token 用量。
+  - 横向柱状图按最长纵坐标文字统一确定左侧起点，柱子紧贴标签右侧对齐。
+  - 新增横向柱状图，展示选中群当前刷新周期内 token 消耗最高的 Top N 用户；0 用量用户不展示。
+  - 新增 `renderUserUsageControls()`、`renderUserUsageWindow()`、`renderUserUsageChart()`、`loadUserUsage()`、`reloadUserUsage()`、`openUserUsage()` 和 `closeUserUsage()`。
+- `README.md`
+  - 补充今日用户 token 用量统计功能、Plugin Page 入口和近 48 小时持久化策略说明。
+- `STRUCTURE.md`
+  - 更新到 v0.6.0，补充 `backend/user_stats.py`、`user_usage_48h.json`、`user-usage` API、页面元素映射和函数职责。
+
 ## 0.5.1 - 2026-06-08
 
 新增“超限后不再响应唤醒词”策略开关。
