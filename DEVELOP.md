@@ -2,6 +2,30 @@
 
 本文档记录每个版本对插件结构、配置、页面和运行逻辑的变动。
 
+## 0.5.0 - 2026-06-08
+
+新增群聊个性化每日上限配置，并增强历史柱状图点击详情。
+
+- `metadata.yaml`
+  - 版本号更新为 `0.5.0`。
+- `main.py`
+  - 新增持久化文件常量 `GROUP_LIMITS_FILE`，运行时生成 `group_limits.json`。
+  - 新增 `_resolve_group_limits_path()`、`_load_group_limits()`、`_save_group_limits()`，按 QQ 群号保存个性化每日 token 上限。
+  - 新增 `_daily_limit_for_group()`，统一读取群聊有效基础上限；存在个性化上限时覆盖全局 `daily_token_limit`。
+  - `_build_event_limit_context()` 改为使用群聊有效上限，确保 LLM 请求限流立即按个性化配置执行。
+  - `_build_usage_payload()` 返回每个群聊的 `global_limit_tokens`、`custom_limit_tokens`、`has_custom_limit` 和对应显示值，Plugin Page 可展示并编辑当前有效上限。
+  - 注册 `GET /astrbot_plugin_token_limit/group-settings` 与 `POST /astrbot_plugin_token_limit/group-settings`。
+  - 新增 `api_get_group_settings()` 和 `api_save_group_settings()`，用于读取/保存“群聊个性化配置”弹窗中的每日上限。
+- `pages/dashboard/index.html`
+  - 用量统计每个群聊的铅笔备注按钮后新增齿轮按钮，打开“群聊个性化配置”弹窗。
+  - 新增 `#groupSettingsOverlay`、`#groupLimitInput`、`#saveGroupSettingsBtn`、`#cancelGroupSettingsBtn`、`#groupSettingsToast` 等页面元素。
+  - 新增 `createGearIcon()`、`setGroupSettingsToast()`、`openGroupSettings()`、`closeGroupSettings()`、`saveGroupSettings()`。
+  - 保存群聊上限后刷新用量列表，使进度条、回退状态和停止响应状态立即按新上限显示。
+  - 历史柱状图柱子新增 hover/active 视觉反馈，并支持点击显示气泡 tag。
+  - 新增 `#historyTooltip`、`showHistoryTooltip()`、`hideHistoryTooltip()`；气泡在鼠标点击位置显示横坐标和 token 用量，文本不省略，宽度随最长行自适应。
+- `STRUCTURE.md`
+  - 更新到 v0.5.0，补充 `group_limits.json`、新增 API、页面元素映射、函数职责、群聊个性化上限与 tooltip 交互规则。
+
 ## 0.4.1 - 2026-06-08
 
 优化“历史 token 用量统计”弹窗的图表密度、下拉菜单状态展示和重新进入时的默认状态。

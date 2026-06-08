@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover - compatible with direct module loading.
 
 PLUGIN_NAME = "astrbot_plugin_token_limit"
 GROUP_REMARKS_FILE = "group_remarks.json"
+GROUP_LIMITS_FILE = "group_limits.json"
 MAX_GROUP_REMARK_LENGTH = 64
 OVER_LIMIT_STOP = "stop_llm"
 OVER_LIMIT_FALLBACK = "fallback_provider"
@@ -215,6 +216,7 @@ class Main(HistoryStatsMixin, Star):
         self.context = context
         self.config = config if config is not None else {}
         self.group_remarks_path = self._resolve_group_remarks_path()
+        self.group_limits_path = self._resolve_group_limits_path()
         self.history_stats_path = self._resolve_history_stats_path()
         self._history_last_sync_attempt: datetime | None = None
         self._history_sync_lock = asyncio.Lock()
@@ -262,6 +264,18 @@ class Main(HistoryStatsMixin, Star):
             ["POST"],
             "Save QQ group remark",
         )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/group-settings",
+            self.api_get_group_settings,
+            ["GET"],
+            "Get QQ group personalized settings",
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/group-settings",
+            self.api_save_group_settings,
+            ["POST"],
+            "Save QQ group personalized settings",
+        )
 
     async def initialize(self) -> None:
         self._start_history_background_sync()
@@ -276,6 +290,12 @@ class Main(HistoryStatsMixin, Star):
             except Exception as exc:
                 logger.warning("Failed to get plugin data dir; using plugin dir: %s", exc)
         return Path(__file__).resolve().with_name(GROUP_REMARKS_FILE)
+
+    def _resolve_group_limits_path(self) -> Path:
+        remarks_path = getattr(self, "group_remarks_path", None)
+        if isinstance(remarks_path, Path):
+            return remarks_path.with_name(GROUP_LIMITS_FILE)
+        return Path(__file__).resolve().with_name(GROUP_LIMITS_FILE)
 
     def _load_group_remarks(self) -> dict[str, str]:
         if not self.group_remarks_path.exists():
@@ -309,6 +329,43 @@ class Main(HistoryStatsMixin, Star):
     @staticmethod
     def _sanitize_group_remark(value: Any) -> str:
         return str(value or "").strip()[:MAX_GROUP_REMARK_LENGTH]
+
+    def _load_group_limits(self) -> dict[str, int]:
+        if not self.group_limits_path.exists():
+            return {}
+        try:
+            raw_data = json.loads(self.group_limits_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Failed to read QQ group personalized limits: %s", exc)
+            return {}
+        if not isinstance(raw_data, dict):
+            return {}
+
+        limits: dict[str, int] = {}
+        for group_id, value in raw_data.items():
+            normalized_group_id = _normalize_group_id(group_id)
+            if not normalized_group_id:
+                continue
+            try:
+                limits[normalized_group_id] = max(0, int(value or 0))
+            except (TypeError, ValueError):
+                continue
+        return limits
+
+    def _save_group_limits(self, limits: dict[str, int]) -> None:
+        normalized_limits = {
+            _normalize_group_id(group_id): max(0, int(limit or 0))
+            for group_id, limit in limits.items()
+            if _normalize_group_id(group_id)
+        }
+        try:
+            self.group_limits_path.parent.mkdir(parents=True, exist_ok=True)
+            self.group_limits_path.write_text(
+                json.dumps(normalized_limits, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            raise ValueError(f"保存 QQ 群个性化配置失败: {exc}") from exc
 
     def _config_value(self, key: str) -> Any:
         if key in self.config:
@@ -352,6 +409,17 @@ class Main(HistoryStatsMixin, Star):
             return max(0, int(self._config_value("daily_token_limit") or 0))
         except (TypeError, ValueError):
             return 0
+
+    def _daily_limit_for_group(
+        self,
+        group_id: str,
+        group_limits: dict[str, int] | None = None,
+    ) -> int:
+        normalized_group_id = _normalize_group_id(group_id)
+        limits = group_limits if group_limits is not None else self._load_group_limits()
+        if normalized_group_id in limits:
+            return max(0, int(limits[normalized_group_id] or 0))
+        return self._daily_limit()
 
     def _over_limit_policy(self) -> dict[str, Any]:
         raw_policy = self._config_value("over_limit_policy")
@@ -586,7 +654,7 @@ class Main(HistoryStatsMixin, Star):
         if not group_id or group_id not in self._limited_groups():
             return None
 
-        limit = self._daily_limit()
+        limit = self._daily_limit_for_group(group_id)
         if limit <= 0:
             return None
 
@@ -632,7 +700,8 @@ class Main(HistoryStatsMixin, Star):
 
     async def _build_usage_payload(self) -> dict[str, Any]:
         groups = self._limited_groups()
-        limit = self._daily_limit()
+        global_limit = self._daily_limit()
+        group_limits = self._load_group_limits()
         policy = self._over_limit_policy()
         fallback_provider_id = (
             str(policy["fallback_provider_id"])
@@ -650,6 +719,8 @@ class Main(HistoryStatsMixin, Star):
         remarks = self._load_group_remarks()
         items = []
         for group_id in groups:
+            limit = self._daily_limit_for_group(group_id, group_limits)
+            has_custom_limit = group_id in group_limits
             primary_used, fallback_used, hourly = await self._query_split_usage_for_group(
                 group_id,
                 window,
@@ -675,11 +746,18 @@ class Main(HistoryStatsMixin, Star):
                     "limit_tokens": effective_limit,
                     "hard_limit_tokens": hard_limit,
                     "primary_limit_tokens": limit,
+                    "global_limit_tokens": global_limit,
+                    "custom_limit_tokens": group_limits.get(group_id),
+                    "has_custom_limit": has_custom_limit,
                     "fallback_limit_tokens": fallback_token_limit,
                     "used_display": _format_tokens(used),
                     "limit_display": _format_tokens(effective_limit),
                     "hard_limit_display": _format_tokens(hard_limit),
                     "primary_limit_display": _format_tokens(limit),
+                    "global_limit_display": _format_tokens(global_limit),
+                    "custom_limit_display": (
+                        _format_tokens(group_limits[group_id]) if has_custom_limit else ""
+                    ),
                     "fallback_limit_display": _format_tokens(fallback_token_limit),
                     "percent": limit_state["percent"],
                     "limited": bool(limit_state["stopped"]),
@@ -700,6 +778,9 @@ class Main(HistoryStatsMixin, Star):
             "enabled": self._is_enabled(),
             "groups": items,
             "remarks": remarks,
+            "group_limits": group_limits,
+            "global_daily_token_limit": global_limit,
+            "global_daily_token_limit_display": _format_tokens(global_limit),
             "over_limit_policy": {
                 **policy,
                 "fallback_configured": fallback_configured,
@@ -907,6 +988,66 @@ class Main(HistoryStatsMixin, Star):
             return _error(str(exc))
 
         return _ok({"group_id": group_id, "remark": remark, "remarks": remarks})
+
+    async def api_get_group_settings(self) -> dict:
+        group_id = _normalize_group_id(request.args.get("group_id"))
+        if not group_id:
+            return _error("group_id is required.")
+
+        global_limit = self._daily_limit()
+        group_limits = self._load_group_limits()
+        has_custom_limit = group_id in group_limits
+        effective_limit = self._daily_limit_for_group(group_id, group_limits)
+        return _ok(
+            {
+                "group_id": group_id,
+                "daily_token_limit": effective_limit,
+                "daily_token_limit_display": _format_tokens(effective_limit),
+                "global_daily_token_limit": global_limit,
+                "global_daily_token_limit_display": _format_tokens(global_limit),
+                "has_custom_limit": has_custom_limit,
+                "custom_daily_token_limit": (
+                    group_limits[group_id] if has_custom_limit else None
+                ),
+                "custom_daily_token_limit_display": (
+                    _format_tokens(group_limits[group_id]) if has_custom_limit else ""
+                ),
+            }
+        )
+
+    async def api_save_group_settings(self) -> dict:
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _error("Request body must be a JSON object.")
+
+        group_id = _normalize_group_id(payload.get("group_id"))
+        if not group_id:
+            return _error("group_id is required.")
+
+        try:
+            daily_token_limit = max(0, int(payload.get("daily_token_limit") or 0))
+        except (TypeError, ValueError):
+            return _error("单个群聊每日用量上限必须是整数。")
+
+        group_limits = self._load_group_limits()
+        group_limits[group_id] = daily_token_limit
+        try:
+            self._save_group_limits(group_limits)
+        except ValueError as exc:
+            return _error(str(exc))
+
+        global_limit = self._daily_limit()
+        return _ok(
+            {
+                "group_id": group_id,
+                "daily_token_limit": daily_token_limit,
+                "daily_token_limit_display": _format_tokens(daily_token_limit),
+                "global_daily_token_limit": global_limit,
+                "global_daily_token_limit_display": _format_tokens(global_limit),
+                "has_custom_limit": True,
+                "group_limits": group_limits,
+            }
+        )
 
     @filter.on_waiting_llm_request(priority=1000)
     async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:

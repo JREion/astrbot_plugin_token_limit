@@ -474,6 +474,23 @@
         line-height: 1.45;
       }
 
+      .group-settings-form {
+        display: grid;
+        gap: 12px;
+        padding-top: 14px;
+      }
+
+      .group-settings-target {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .group-settings-hint {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
       .strategy-form {
         display: grid;
         gap: 0;
@@ -727,9 +744,22 @@
         min-height: 2px;
         border-radius: 6px 6px 0 0;
         background: var(--blue);
+        cursor: pointer;
         transition:
           height 320ms ease,
-          background 150ms ease;
+          background 150ms ease,
+          transform 80ms ease,
+          box-shadow 150ms ease;
+      }
+
+      .history-bar:hover {
+        background: #1f5fcf;
+        box-shadow: 0 0 0 3px rgba(45, 108, 223, 0.14);
+      }
+
+      .history-bar:active {
+        background: #194fae;
+        transform: translateY(1px);
       }
 
       .history-x-axis {
@@ -763,6 +793,40 @@
       .history-footer {
         color: var(--muted);
         font-size: 12px;
+      }
+
+      .history-tooltip {
+        position: fixed;
+        z-index: 60;
+        display: none;
+        padding: 9px 11px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        background: #fff;
+        color: var(--text);
+        box-shadow: 0 12px 28px rgba(11, 18, 32, 0.18);
+        pointer-events: none;
+        white-space: nowrap;
+        width: max-content;
+      }
+
+      .history-tooltip.open {
+        display: grid;
+        gap: 4px;
+      }
+
+      .history-tooltip-line {
+        display: block;
+        overflow: visible;
+        color: var(--text);
+        font-size: 13px;
+        line-height: 1.25;
+        text-overflow: clip;
+        white-space: nowrap;
+      }
+
+      .history-tooltip-value {
+        font-weight: 800;
       }
 
       .switch {
@@ -950,6 +1014,47 @@
       </section>
     </div>
 
+    <div id="groupSettingsOverlay" class="overlay compact" role="dialog" aria-modal="true">
+      <section class="modal">
+        <div class="modal-topbar">
+          <div class="modal-title">群聊个性化配置</div>
+          <div class="modal-actions">
+            <button id="saveGroupSettingsBtn" class="action-button primary" type="button">
+              保存
+            </button>
+            <button id="cancelGroupSettingsBtn" class="action-button" type="button">
+              取消
+            </button>
+          </div>
+        </div>
+        <div class="modal-content">
+          <div class="group-settings-form">
+            <div id="groupSettingsTarget" class="group-settings-target"></div>
+            <label>
+              <div class="config-name">单个群聊每日用量上限</div>
+              <input
+                id="groupLimitInput"
+                class="field"
+                type="number"
+                min="0"
+                step="1"
+              />
+            </label>
+            <div id="groupSettingsHint" class="group-settings-hint"></div>
+            <div id="groupSettingsToast" class="toast"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div id="historyTooltip" class="history-tooltip" role="status" aria-live="polite">
+      <span id="historyTooltipLabel" class="history-tooltip-line"></span>
+      <span
+        id="historyTooltipValue"
+        class="history-tooltip-line history-tooltip-value"
+      ></span>
+    </div>
+
     <script>
       const api = window.AstrBotPluginPage;
       const state = {
@@ -958,6 +1063,8 @@
         strategyDraft: {},
         schema: {},
         currentRemarkGroupId: "",
+        currentSettingsGroupId: "",
+        currentSettingsInitialLimit: null,
         history: {
           groups: [],
           selectedGroupId: "",
@@ -976,6 +1083,7 @@
       const strategyOverlay = document.getElementById("strategyOverlay");
       const historyOverlay = document.getElementById("historyOverlay");
       const remarkOverlay = document.getElementById("remarkOverlay");
+      const groupSettingsOverlay = document.getElementById("groupSettingsOverlay");
       const configForm = document.getElementById("configForm");
       const strategyForm = document.getElementById("strategyForm");
       const toast = document.getElementById("toast");
@@ -996,6 +1104,13 @@
       const remarkInput = document.getElementById("remarkInput");
       const remarkTarget = document.getElementById("remarkTarget");
       const remarkToast = document.getElementById("remarkToast");
+      const groupSettingsTarget = document.getElementById("groupSettingsTarget");
+      const groupLimitInput = document.getElementById("groupLimitInput");
+      const groupSettingsHint = document.getElementById("groupSettingsHint");
+      const groupSettingsToast = document.getElementById("groupSettingsToast");
+      const historyTooltip = document.getElementById("historyTooltip");
+      const historyTooltipLabel = document.getElementById("historyTooltipLabel");
+      const historyTooltipValue = document.getElementById("historyTooltipValue");
       let historyResizeFrame = 0;
 
       function setToast(message, isError = false) {
@@ -1013,6 +1128,11 @@
         remarkToast.classList.toggle("error", Boolean(isError));
       }
 
+      function setGroupSettingsToast(message, isError = false) {
+        groupSettingsToast.textContent = message || "";
+        groupSettingsToast.classList.toggle("error", Boolean(isError));
+      }
+
       function createPencilIcon() {
         const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
         svg.setAttribute("viewBox", "0 0 24 24");
@@ -1025,6 +1145,29 @@
         path.setAttribute(
           "d",
           "M12 20h9 M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z",
+        );
+        svg.append(path);
+        return svg;
+      }
+
+      function createGearIcon() {
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", "0 0 24 24");
+        svg.setAttribute("fill", "none");
+        svg.setAttribute("stroke", "currentColor");
+        svg.setAttribute("stroke-linecap", "round");
+        svg.setAttribute("stroke-linejoin", "round");
+
+        const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        circle.setAttribute("cx", "12");
+        circle.setAttribute("cy", "12");
+        circle.setAttribute("r", "3");
+        svg.append(circle);
+
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute(
+          "d",
+          "M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.1a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1z",
         );
         svg.append(path);
         return svg;
@@ -1254,7 +1397,20 @@
             openRemark(group.group_id, group.remark || "");
           });
 
-          groupInfo.append(groupText, remarkButton);
+          const settingsButton = document.createElement("button");
+          settingsButton.className = "icon-button";
+          settingsButton.type = "button";
+          settingsButton.title = "群聊个性化配置";
+          settingsButton.setAttribute(
+            "aria-label",
+            `配置 ${group.group_id} 的每日用量上限`,
+          );
+          settingsButton.append(createGearIcon());
+          settingsButton.addEventListener("click", () => {
+            openGroupSettings(group);
+          });
+
+          groupInfo.append(groupText, remarkButton, settingsButton);
 
           const usageSide = document.createElement("div");
           usageSide.className = "usage-side";
@@ -1332,6 +1488,7 @@
       }
 
       async function reloadHistory() {
+        hideHistoryTooltip();
         historyChart.innerHTML = '<div class="history-empty">加载中...</div>';
         historyXAxis.innerHTML = "";
         historyYAxis.innerHTML = "";
@@ -1508,7 +1665,33 @@
         return aggregateHistoryBars(bars, 4);
       }
 
+      function hideHistoryTooltip() {
+        historyTooltip.classList.remove("open");
+      }
+
+      function showHistoryTooltip(bar, event) {
+        const valueText = bar.display || formatTokenNumber(bar.tokens || 0);
+        historyTooltipLabel.textContent = bar.label || "";
+        historyTooltipValue.textContent = valueText;
+        historyTooltip.classList.add("open");
+
+        const margin = 10;
+        const offset = 14;
+        const rect = historyTooltip.getBoundingClientRect();
+        let left = event.clientX + offset;
+        let top = event.clientY + offset;
+        if (left + rect.width + margin > window.innerWidth) {
+          left = event.clientX - rect.width - offset;
+        }
+        if (top + rect.height + margin > window.innerHeight) {
+          top = event.clientY - rect.height - offset;
+        }
+        historyTooltip.style.left = `${Math.max(margin, left)}px`;
+        historyTooltip.style.top = `${Math.max(margin, top)}px`;
+      }
+
       function renderHistoryChart() {
+        hideHistoryTooltip();
         const bars = resolveHistoryBarsForViewport(state.history.bars || []);
         historyChart.innerHTML = "";
         historyXAxis.innerHTML = "";
@@ -1546,6 +1729,10 @@
           column.className = "history-bar";
           column.title = `${bar.label}: ${value.textContent}`;
           column.style.height = "0%";
+          column.addEventListener("click", (event) => {
+            event.stopPropagation();
+            showHistoryTooltip(bar, event);
+          });
 
           item.append(value, column);
           historyChart.append(item);
@@ -1654,6 +1841,7 @@
       function closeHistory() {
         historyOverlay.classList.remove("open");
         closeCustomSelects();
+        hideHistoryTooltip();
       }
 
       function handleHistoryResize() {
@@ -1688,6 +1876,51 @@
         state.currentRemarkGroupId = "";
         remarkInput.value = "";
         setRemarkToast("");
+      }
+
+      async function openGroupSettings(group) {
+        state.currentSettingsGroupId = String(group.group_id || "");
+        groupSettingsTarget.textContent = `QQ 群号：${state.currentSettingsGroupId}`;
+        groupLimitInput.value = group.primary_limit_tokens ?? group.global_limit_tokens ?? "";
+        state.currentSettingsInitialLimit = Number.parseInt(
+          groupLimitInput.value || "0",
+          10,
+        );
+        groupSettingsHint.textContent = group.has_custom_limit
+          ? "当前使用该群聊的个性化上限；保存后不会随全局上限变化。"
+          : `当前显示全局上限：${group.global_limit_display || group.primary_limit_display || ""}`;
+        setGroupSettingsToast("");
+        groupSettingsOverlay.classList.add("open");
+
+        try {
+          const payload = await api.apiGet("group-settings", {
+            group_id: state.currentSettingsGroupId,
+          });
+          groupLimitInput.value = String(payload.daily_token_limit ?? "");
+          state.currentSettingsInitialLimit = Number.parseInt(
+            groupLimitInput.value || "0",
+            10,
+          );
+          groupSettingsHint.textContent = payload.has_custom_limit
+            ? "当前使用该群聊的个性化上限；保存后不会随全局上限变化。"
+            : `当前显示全局上限：${payload.global_daily_token_limit_display || ""}`;
+        } catch (error) {
+          setGroupSettingsToast(error.message || String(error), true);
+        }
+
+        window.requestAnimationFrame(() => {
+          groupLimitInput.focus();
+          groupLimitInput.select();
+        });
+      }
+
+      function closeGroupSettings() {
+        groupSettingsOverlay.classList.remove("open");
+        state.currentSettingsGroupId = "";
+        state.currentSettingsInitialLimit = null;
+        groupLimitInput.value = "";
+        groupSettingsHint.textContent = "";
+        setGroupSettingsToast("");
       }
 
       async function saveConfig() {
@@ -1735,6 +1968,28 @@
         }
       }
 
+      async function saveGroupSettings() {
+        if (!state.currentSettingsGroupId) return;
+
+        try {
+          setGroupSettingsToast("保存中...");
+          const value = Number.parseInt(groupLimitInput.value || "0", 10);
+          const nextValue = Number.isNaN(value) ? 0 : value;
+          if (nextValue === state.currentSettingsInitialLimit) {
+            closeGroupSettings();
+            return;
+          }
+          await api.apiPost("group-settings", {
+            group_id: state.currentSettingsGroupId,
+            daily_token_limit: nextValue,
+          });
+          closeGroupSettings();
+          await loadUsage();
+        } catch (error) {
+          setGroupSettingsToast(error.message || String(error), true);
+        }
+      }
+
       document.getElementById("openConfigBtn").addEventListener("click", openConfig);
       document.getElementById("openStrategyBtn").addEventListener("click", openStrategy);
       document.getElementById("openHistoryBtn").addEventListener("click", openHistory);
@@ -1746,6 +2001,12 @@
       document.getElementById("cancelHistoryBtn").addEventListener("click", closeHistory);
       document.getElementById("cancelRemarkBtn").addEventListener("click", closeRemark);
       document.getElementById("saveRemarkBtn").addEventListener("click", saveRemark);
+      document
+        .getElementById("cancelGroupSettingsBtn")
+        .addEventListener("click", closeGroupSettings);
+      document
+        .getElementById("saveGroupSettingsBtn")
+        .addEventListener("click", saveGroupSettings);
       groupSelectTrigger.addEventListener("click", (event) => {
         event.stopPropagation();
         toggleCustomSelect(groupSelect);
@@ -1762,6 +2023,7 @@
       });
       document.addEventListener("click", () => {
         closeCustomSelects();
+        hideHistoryTooltip();
       });
       window.addEventListener("resize", handleHistoryResize);
       overlay.addEventListener("click", (event) => {
@@ -1776,12 +2038,23 @@
       remarkOverlay.addEventListener("click", (event) => {
         if (event.target === remarkOverlay) closeRemark();
       });
+      groupSettingsOverlay.addEventListener("click", (event) => {
+        if (event.target === groupSettingsOverlay) closeGroupSettings();
+      });
       remarkInput.addEventListener("keydown", (event) => {
         if (event.key === "Enter") {
           event.preventDefault();
           saveRemark();
         } else if (event.key === "Escape") {
           closeRemark();
+        }
+      });
+      groupLimitInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          saveGroupSettings();
+        } else if (event.key === "Escape") {
+          closeGroupSettings();
         }
       });
 

@@ -1,6 +1,6 @@
 # STRUCTURE
 
-本文档记录 v0.4.1 版本的插件结构、内部 API、页面元素映射和主要函数职责。
+本文档记录 v0.5.0 版本的插件结构、内部 API、页面元素映射和主要函数职责。
 
 ## 文件结构
 
@@ -26,10 +26,12 @@ astrbot_plugin_token_limit/
 ```text
 <AstrBot plugin data>/astrbot_plugin_token_limit/
 ├── group_remarks.json
+├── group_limits.json
 └── history_usage.json
 ```
 
 - `group_remarks.json`：保存 QQ 群号到备注名的映射，不跟随 `limited_groups` 删除而删除。
+- `group_limits.json`：保存 QQ 群号到个性化每日 token 上限的映射；一旦保存即覆盖全局 `daily_token_limit`，不随后续全局上限变化。
 - `history_usage.json`：保存历史 token 用量，包含每个被追踪群的 `tracked_since`、`last_synced_at`、`total_tokens` 和非零小时桶 `hours`。
 
 ## 元数据与配置
@@ -37,7 +39,7 @@ astrbot_plugin_token_limit/
 ### metadata.yaml
 
 - `name`：插件名称，当前为 `astrbot_plugin_token_limit`。
-- `version`：当前版本 `0.4.1`。
+- `version`：当前版本 `0.5.0`。
 - `repo`：插件仓库地址。
 - `support_platforms`：默认支持 `aiocqhttp`、`qq_official`、`qq_official_webhook`。
 - `pages`：声明 `dashboard` Plugin Page，页面文件为 `pages/dashboard/index.html`。
@@ -68,6 +70,7 @@ astrbot_plugin_token_limit/
 
 - `PLUGIN_NAME`：插件名称和 Web API 前缀。
 - `GROUP_REMARKS_FILE`：备注文件名。
+- `GROUP_LIMITS_FILE`：群聊个性化每日上限文件名。
 - `MAX_GROUP_REMARK_LENGTH`：备注最大长度，当前 64。
 - `OVER_LIMIT_STOP` / `OVER_LIMIT_FALLBACK`：超限策略枚举值。
 - `TOKEN_FIELDS_SUM`：AstrBot `ProviderStat` 中输入、缓存输入和输出 token 字段求和表达式。
@@ -93,6 +96,7 @@ astrbot_plugin_token_limit/
 
 - 保存 `Context` 和配置对象。
 - 解析 `group_remarks.json` 与 `history_usage.json` 路径。
+- 解析 `group_limits.json` 路径。
 - 初始化 `_history_sync_lock`，避免多个请求并发同步同一历史文件。
 - 调用 `_ensure_history_tracking_for_current_groups()`，让当前配置中的群号在插件启动时开始历史追踪。
 - 注册 Web API：
@@ -103,6 +107,8 @@ astrbot_plugin_token_limit/
   - `GET /astrbot_plugin_token_limit/providers`
   - `GET /astrbot_plugin_token_limit/remarks`
   - `POST /astrbot_plugin_token_limit/remarks`
+  - `GET /astrbot_plugin_token_limit/group-settings`
+  - `POST /astrbot_plugin_token_limit/group-settings`
 
 `initialize()`：
 
@@ -117,6 +123,8 @@ astrbot_plugin_token_limit/
 - `_resolve_group_remarks_path()`：优先使用 `StarTools.get_data_dir()`，失败时回退插件目录。
 - `_load_group_remarks()` / `_save_group_remarks()`：读写备注 JSON。
 - `_sanitize_group_remark()`：裁剪备注。
+- `_resolve_group_limits_path()`：与备注文件同目录存放群聊个性化上限文件。
+- `_load_group_limits()` / `_save_group_limits()`：读写 `group_limits.json`，按群号保存非负整数 token 上限。
 - `_config_value()`：读取配置，缺省时使用 schema 默认值。
 - `_serialize_config()`：输出完整配置快照。
 - `_sanitize_config()`：校验并标准化所有配置项。
@@ -136,6 +144,7 @@ astrbot_plugin_token_limit/
 ### 用量、回退和硬上限
 
 - `_daily_limit()`：读取基础 token 上限。
+- `_daily_limit_for_group(group_id, group_limits=None)`：读取某个群聊的有效基础上限；存在个性化上限时优先使用 `group_limits.json`，否则回退全局 `daily_token_limit`。
 - `_over_limit_policy()`：合并并清洗超限策略。
 - `_fallback_provider_id()` / `_fallback_token_limit()`：读取回退供应商和回退额度。
 - `_fallback_provider_exists(provider_id)`：检查供应商存在且支持 `text_chat`。
@@ -153,7 +162,7 @@ astrbot_plugin_token_limit/
   - `fallback_provider` 且回退额度大于 0：`used < limit` 为 `normal`，`limit <= used < limit + fallback_token_limit` 为 `fallback`，`used >= hard_limit` 为 `stopped`。
   - 回退供应商是否可用不改变硬上限，只影响是否能强制选择该供应商。
 - `_build_event_limit_context(event)`：为等待 LLM 和 LLM 请求钩子构造统一限流上下文。
-- `_build_usage_payload()`：生成 Plugin Page 当前窗口用量数据，包括备注、状态、硬上限、回退标签所需字段和小时桶。
+- `_build_usage_payload()`：生成 Plugin Page 当前窗口用量数据，包括备注、群聊有效上限、是否使用个性化上限、状态、硬上限、回退标签所需字段和小时桶。
 
 ### Web API 函数
 
@@ -166,6 +175,8 @@ astrbot_plugin_token_limit/
 | `api_get_providers()` | `GET providers` | 返回可用回退供应商列表。 |
 | `api_get_remarks()` | `GET remarks` | 返回备注映射。 |
 | `api_save_remark()` | `POST remarks` | 保存或删除备注。 |
+| `api_get_group_settings()` | `GET group-settings` | 返回某个群聊的有效每日上限、全局上限和是否已设置个性化上限。 |
+| `api_save_group_settings()` | `POST group-settings` | 保存某个群聊的个性化每日上限到 `group_limits.json`。 |
 
 统一响应结构：
 
@@ -268,6 +279,7 @@ astrbot_plugin_token_limit/
   - `.group-id`：QQ 群号。
   - `.group-remark`：灰色括号备注。
   - `.icon-button`：编辑备注铅笔按钮。
+  - 齿轮 `.icon-button`：打开“群聊个性化配置”弹窗，为单个群聊保存每日用量上限。
   - `.fallback-tag`：黄色“回退模型”标签。
   - `.stop-tag`：红色“停止响应”标签。
   - `.usage-value.fallback` / `.usage-value.stopped`：黄色/红色用量值。
@@ -296,12 +308,21 @@ astrbot_plugin_token_limit/
   - `#historyFooter`：最后同步时间。
 - `#remarkOverlay`：备注编辑弹窗。
   - `#remarkTarget`、`#remarkInput`、`#saveRemarkBtn`、`#cancelRemarkBtn`、`#remarkToast`。
+- `#groupSettingsOverlay`：群聊个性化配置弹窗。
+  - `#groupSettingsTarget`：当前配置目标群号。
+  - `#groupLimitInput`：该群聊每日 token 上限输入框，默认显示当前有效上限。
+  - `#groupSettingsHint`：说明当前值来自全局上限还是个性化上限。
+  - `#saveGroupSettingsBtn` / `#cancelGroupSettingsBtn` / `#groupSettingsToast`：保存、取消和状态提示。
+- `#historyTooltip`：历史柱状图点击后显示的气泡 tag。
+  - `#historyTooltipLabel`：柱子横坐标内容。
+  - `#historyTooltipValue`：柱子 token 数值统计量，粗体显示。
 
 ### 前端函数
 
 - 通用：`setToast()`、`setStrategyToast()`、`setRemarkToast()`、`formatDate()`、`normalizeTextareaText()`、`normalizeListText()`、`parseListText()`。
 - 配置渲染：`renderConfigControl()`、`appendConfigRow()`、`renderConfigForm()`、`renderStrategyForm()`。
 - 当前用量：`renderUsage()`、`loadUsage()`。
+- 群聊个性化配置：`openGroupSettings()`、`closeGroupSettings()`、`saveGroupSettings()`。
 - 历史统计：
   - `historyRangeLabel()`：时间跨度标签。
   - `closeCustomSelects()` / `toggleCustomSelect()`：自绘下拉菜单开合。
@@ -314,16 +335,19 @@ astrbot_plugin_token_limit/
   - `aggregateHistoryBars()`：前端按指定小时数聚合近 24 小时原始小时桶。
   - `resolveHistoryBarsForViewport()`：根据图表可用宽度选择 2、3 或 4 小时聚合粒度。
   - `handleHistoryResize()`：历史弹窗打开时随窗口宽度变化重新计算 24 小时聚合粒度。
+  - `showHistoryTooltip()` / `hideHistoryTooltip()`：点击柱状图柱子时，在鼠标位置显示/隐藏完整内容气泡。
   - `renderHistoryChart()`：渲染动态轴、数值标签和柱状图动画。
   - `formatTokenNumber()`：前端轴标签格式化。
-- 弹窗：`openConfig()`、`closeConfig()`、`openStrategy()`、`closeStrategy()`、`openHistory()`、`closeHistory()`、`openRemark()`、`closeRemark()`。
-- 保存：`saveConfig()`、`saveStrategy()`、`saveRemark()`。
+- 弹窗：`openConfig()`、`closeConfig()`、`openStrategy()`、`closeStrategy()`、`openHistory()`、`closeHistory()`、`openRemark()`、`closeRemark()`、`openGroupSettings()`、`closeGroupSettings()`。
+- 保存：`saveConfig()`、`saveStrategy()`、`saveRemark()`、`saveGroupSettings()`。
 - `init()`：等待 bridge ready 后加载配置和当前用量。
 
 ### 页面交互规则
 
 - 所有按钮都有 `:hover` 与 `:active` 颜色/位移反馈。
 - 备注显示在群号右侧，格式为 `（备注）`；铅笔图标跟在群号或备注右侧。
+- 用量统计每个群聊的铅笔按钮后方显示齿轮按钮；点击后可保存该群聊个性化每日用量上限。
+- 群聊个性化上限保存后立即影响当前用量进度条、回退/停止状态和 LLM 请求限流判断；其他群聊继续使用全局上限。
 - 配置 textarea 会把保存值中的显式 `\n` 渲染为真实换行。
 - 历史统计群聊下拉菜单中，状态圆点放在每日 token 用量数字前方：绿色正常、黄色回退、红色停止响应。
 - 未选择群聊时，历史图展示历史总 token Top N 群聊。
@@ -332,11 +356,13 @@ astrbot_plugin_token_limit/
 - 近 24 小时柱状图由页面按宽度动态选择聚合粒度：优先 2 小时 12 根柱；空间不足时降为 3 小时 8 根柱；仍不足时降为 4 小时 6 根柱。
 - 近一个月柱状图按 3 天聚合，横坐标月份使用英文缩写，例如 `Jun 06-08`；近 24 小时和近一个月柱顶数值保留 1 位小数，其他口径保持原有小数位。
 - 选中群聊后，两个下拉菜单右侧显示所选时间跨度内该群 token 用量总和。
+- 点击历史柱状图中的任一柱子会显示气泡 tag，第一行为横坐标，第二行为 token 用量值；文本强制完整显示，宽度随最长文本行自适应。
 - 柱状图切换数据时通过高度过渡动画平滑变化；横纵坐标和柱顶数值由数据动态生成。
 
 ## 配置与统计同步逻辑
 
 - 当前窗口限流统计使用 `refresh_time` 切分 24 小时窗口。
+- 群聊个性化上限只覆盖基础 `daily_token_limit`；回退模型额外上限仍来自全局 `over_limit_policy.fallback_token_limit`。
 - 历史统计不依赖 `refresh_time`；它以群号首次加入 `limited_groups` 的时间为起点，按小时桶持久化。
 - 历史同步基于 AstrBot 原生 `ProviderStat`，保存的是每小时绝对桶值，不是累加 delta。
 - 配置保存会强制同步一次历史统计；页面 `usage` 和 LLM 等待钩子会节流同步。
