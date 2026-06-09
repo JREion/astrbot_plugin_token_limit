@@ -38,6 +38,8 @@ PLUGIN_NAME = "astrbot_plugin_token_limit"
 GROUP_REMARKS_FILE = "group_remarks.json"
 GROUP_LIMITS_FILE = "group_limits.json"
 MAX_GROUP_REMARK_LENGTH = 64
+GROUP_SETTING_DAILY_LIMIT = "daily_token_limit"
+GROUP_SETTING_ONLY_AT_BOT = "only_at_bot_llm"
 OVER_LIMIT_STOP = "stop_llm"
 OVER_LIMIT_FALLBACK = "fallback_provider"
 TOKEN_FIELDS_SUM = (
@@ -359,42 +361,91 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
     def _sanitize_group_remark(value: Any) -> str:
         return str(value or "").strip()[:MAX_GROUP_REMARK_LENGTH]
 
-    def _load_group_limits(self) -> dict[str, int]:
+    def _load_group_settings(self) -> dict[str, dict[str, Any]]:
         if not self.group_limits_path.exists():
             return {}
         try:
             raw_data = json.loads(self.group_limits_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning("Failed to read QQ group personalized limits: %s", exc)
+            logger.warning("Failed to read QQ group personalized settings: %s", exc)
             return {}
         if not isinstance(raw_data, dict):
             return {}
 
-        limits: dict[str, int] = {}
+        settings: dict[str, dict[str, Any]] = {}
         for group_id, value in raw_data.items():
             normalized_group_id = _normalize_group_id(group_id)
             if not normalized_group_id:
                 continue
+            if isinstance(value, dict):
+                item: dict[str, Any] = {}
+                if GROUP_SETTING_DAILY_LIMIT in value:
+                    try:
+                        item[GROUP_SETTING_DAILY_LIMIT] = max(
+                            0,
+                            int(value.get(GROUP_SETTING_DAILY_LIMIT) or 0),
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                if bool(value.get(GROUP_SETTING_ONLY_AT_BOT, False)):
+                    item[GROUP_SETTING_ONLY_AT_BOT] = True
+                if item:
+                    settings[normalized_group_id] = item
+                continue
             try:
-                limits[normalized_group_id] = max(0, int(value or 0))
+                settings[normalized_group_id] = {
+                    GROUP_SETTING_DAILY_LIMIT: max(0, int(value or 0))
+                }
             except (TypeError, ValueError):
                 continue
-        return limits
+        return settings
 
-    def _save_group_limits(self, limits: dict[str, int]) -> None:
-        normalized_limits = {
-            _normalize_group_id(group_id): max(0, int(limit or 0))
-            for group_id, limit in limits.items()
-            if _normalize_group_id(group_id)
-        }
+    def _save_group_settings(self, settings: dict[str, dict[str, Any]]) -> None:
+        normalized_settings: dict[str, dict[str, Any]] = {}
+        for group_id, value in settings.items():
+            normalized_group_id = _normalize_group_id(group_id)
+            if not normalized_group_id or not isinstance(value, dict):
+                continue
+            item: dict[str, Any] = {}
+            if GROUP_SETTING_DAILY_LIMIT in value:
+                item[GROUP_SETTING_DAILY_LIMIT] = max(
+                    0,
+                    int(value.get(GROUP_SETTING_DAILY_LIMIT) or 0),
+                )
+            if bool(value.get(GROUP_SETTING_ONLY_AT_BOT, False)):
+                item[GROUP_SETTING_ONLY_AT_BOT] = True
+            if item:
+                normalized_settings[normalized_group_id] = item
         try:
             self.group_limits_path.parent.mkdir(parents=True, exist_ok=True)
             self.group_limits_path.write_text(
-                json.dumps(normalized_limits, ensure_ascii=False, indent=2),
+                json.dumps(normalized_settings, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception as exc:
             raise ValueError(f"保存 QQ 群个性化配置失败: {exc}") from exc
+
+    def _load_group_limits(self) -> dict[str, int]:
+        limits: dict[str, int] = {}
+        for group_id, settings in self._load_group_settings().items():
+            if GROUP_SETTING_DAILY_LIMIT in settings:
+                limits[group_id] = max(0, int(settings[GROUP_SETTING_DAILY_LIMIT] or 0))
+        return limits
+
+    def _save_group_limits(self, limits: dict[str, int]) -> None:
+        current_settings = self._load_group_settings()
+        next_settings: dict[str, dict[str, Any]] = {}
+        for group_id, settings in current_settings.items():
+            if bool(settings.get(GROUP_SETTING_ONLY_AT_BOT, False)):
+                next_settings[group_id] = {GROUP_SETTING_ONLY_AT_BOT: True}
+        for group_id, limit in limits.items():
+            normalized_group_id = _normalize_group_id(group_id)
+            if not normalized_group_id:
+                continue
+            item = dict(next_settings.get(normalized_group_id, {}))
+            item[GROUP_SETTING_DAILY_LIMIT] = max(0, int(limit or 0))
+            next_settings[normalized_group_id] = item
+        self._save_group_settings(next_settings)
 
     def _config_value(self, key: str) -> Any:
         if key in self.config:
@@ -449,6 +500,24 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
         if normalized_group_id in limits:
             return max(0, int(limits[normalized_group_id] or 0))
         return self._daily_limit()
+
+    def _group_only_at_bot_llm(
+        self,
+        group_id: str,
+        group_settings: dict[str, dict[str, Any]] | None = None,
+    ) -> bool:
+        normalized_group_id = _normalize_group_id(group_id)
+        settings = (
+            group_settings
+            if group_settings is not None
+            else self._load_group_settings()
+        )
+        return bool(
+            settings.get(normalized_group_id, {}).get(
+                GROUP_SETTING_ONLY_AT_BOT,
+                False,
+            )
+        )
 
     def _over_limit_policy(self) -> dict[str, Any]:
         raw_policy = self._config_value("over_limit_policy")
@@ -679,6 +748,40 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
         limit = int(limit_context["limit"])
         used = int(limit_context["limit_state"]["used"])
         return limit > 0 and used >= limit and self._is_wake_word_invocation(event)
+
+    def _should_block_group_only_at_bot_invocation(
+        self,
+        event: AstrMessageEvent,
+    ) -> str | None:
+        if not self._is_enabled():
+            return None
+        if not self._is_qq_group_event(event):
+            return None
+        group_id = _normalize_group_id(event.get_group_id())
+        if not group_id or group_id not in self._limited_groups():
+            return None
+        if not self._group_only_at_bot_llm(group_id):
+            return None
+        if not self._is_wake_word_invocation(event):
+            return None
+        return group_id
+
+    def _block_group_only_at_bot_invocation_if_needed(
+        self,
+        event: AstrMessageEvent,
+        stage: str,
+    ) -> bool:
+        group_id = self._should_block_group_only_at_bot_invocation(event)
+        if not group_id:
+            return False
+        event.stop_event()
+        logger.info(
+            "Blocked wake-word invocation by group @bot-only policy: "
+            "stage=%s group=%s",
+            stage,
+            group_id,
+        )
+        return True
 
     def _is_enabled(self) -> bool:
         return bool(self._config_value("enabled"))
@@ -917,7 +1020,12 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
     async def _build_usage_payload(self) -> dict[str, Any]:
         groups = self._limited_groups()
         global_limit = self._daily_limit()
-        group_limits = self._load_group_limits()
+        group_settings = self._load_group_settings()
+        group_limits = {
+            group_id: int(settings[GROUP_SETTING_DAILY_LIMIT])
+            for group_id, settings in group_settings.items()
+            if GROUP_SETTING_DAILY_LIMIT in settings
+        }
         policy = self._over_limit_policy()
         fallback_provider_id = (
             str(policy["fallback_provider_id"])
@@ -937,6 +1045,7 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
         for group_id in groups:
             limit = self._daily_limit_for_group(group_id, group_limits)
             has_custom_limit = group_id in group_limits
+            only_at_bot_llm = self._group_only_at_bot_llm(group_id, group_settings)
             primary_used, fallback_used, hourly = await self._query_split_usage_for_group(
                 group_id,
                 window,
@@ -965,6 +1074,7 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
                     "global_limit_tokens": global_limit,
                     "custom_limit_tokens": group_limits.get(group_id),
                     "has_custom_limit": has_custom_limit,
+                    "only_at_bot_llm": only_at_bot_llm,
                     "fallback_limit_tokens": fallback_token_limit,
                     "used_display": _format_tokens(used),
                     "limit_display": _format_tokens(effective_limit),
@@ -995,6 +1105,7 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
             "groups": items,
             "remarks": remarks,
             "group_limits": group_limits,
+            "group_settings": group_settings,
             "global_daily_token_limit": global_limit,
             "global_daily_token_limit_display": _format_tokens(global_limit),
             "over_limit_policy": {
@@ -1224,7 +1335,116 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
             return _error("group_id is required.")
 
         global_limit = self._daily_limit()
-        group_limits = self._load_group_limits()
+        group_settings = self._load_group_settings()
+        group_limits = {
+            item_group_id: int(settings[GROUP_SETTING_DAILY_LIMIT])
+            for item_group_id, settings in group_settings.items()
+            if GROUP_SETTING_DAILY_LIMIT in settings
+        }
+        has_custom_limit = group_id in group_limits
+        effective_limit = self._daily_limit_for_group(group_id, group_limits)
+        only_at_bot_llm = self._group_only_at_bot_llm(group_id, group_settings)
+        return _ok(
+            {
+                "group_id": group_id,
+                "daily_token_limit": effective_limit,
+                "daily_token_limit_display": _format_tokens(effective_limit),
+                "global_daily_token_limit": global_limit,
+                "global_daily_token_limit_display": _format_tokens(global_limit),
+                "has_custom_limit": has_custom_limit,
+                "custom_daily_token_limit": (
+                    group_limits[group_id] if has_custom_limit else None
+                ),
+                "custom_daily_token_limit_display": (
+                    _format_tokens(group_limits[group_id]) if has_custom_limit else ""
+                ),
+                "only_at_bot_llm": only_at_bot_llm,
+            }
+        )
+
+    async def api_save_group_settings(self) -> dict:
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _error("Request body must be a JSON object.")
+
+        group_id = _normalize_group_id(payload.get("group_id"))
+        if not group_id:
+            return _error("group_id is required.")
+
+        group_settings = self._load_group_settings()
+        group_limits = {
+            item_group_id: int(settings[GROUP_SETTING_DAILY_LIMIT])
+            for item_group_id, settings in group_settings.items()
+            if GROUP_SETTING_DAILY_LIMIT in settings
+        }
+        if bool(payload.get("reset")):
+            group_settings.setdefault(group_id, {}).pop(GROUP_SETTING_DAILY_LIMIT, None)
+            if not group_settings[group_id]:
+                group_settings.pop(group_id, None)
+            try:
+                self._save_group_settings(group_settings)
+            except ValueError as exc:
+                return _error(str(exc))
+
+            group_limits.pop(group_id, None)
+            global_limit = self._daily_limit()
+            return _ok(
+                {
+                    "group_id": group_id,
+                    "daily_token_limit": global_limit,
+                    "daily_token_limit_display": _format_tokens(global_limit),
+                    "global_daily_token_limit": global_limit,
+                    "global_daily_token_limit_display": _format_tokens(global_limit),
+                    "has_custom_limit": False,
+                    "custom_daily_token_limit": None,
+                    "custom_daily_token_limit_display": "",
+                    "group_limits": group_limits,
+                    "group_settings": group_settings,
+                    "only_at_bot_llm": self._group_only_at_bot_llm(
+                        group_id,
+                        group_settings,
+                    ),
+                }
+            )
+
+        current_group_settings = dict(group_settings.get(group_id, {}))
+        if "daily_token_limit" in payload:
+            try:
+                next_daily_limit = max(
+                    0,
+                    int(payload.get("daily_token_limit") or 0),
+                )
+            except (TypeError, ValueError):
+                return _error("daily_token_limit must be an integer.")
+            if (
+                GROUP_SETTING_DAILY_LIMIT not in current_group_settings
+                and next_daily_limit == self._daily_limit()
+            ):
+                current_group_settings.pop(GROUP_SETTING_DAILY_LIMIT, None)
+            else:
+                current_group_settings[GROUP_SETTING_DAILY_LIMIT] = next_daily_limit
+        if "only_at_bot_llm" in payload:
+            current_group_settings[GROUP_SETTING_ONLY_AT_BOT] = bool(
+                payload.get("only_at_bot_llm")
+            )
+            if not current_group_settings[GROUP_SETTING_ONLY_AT_BOT]:
+                current_group_settings.pop(GROUP_SETTING_ONLY_AT_BOT, None)
+
+        if current_group_settings:
+            group_settings[group_id] = current_group_settings
+        else:
+            group_settings.pop(group_id, None)
+        try:
+            self._save_group_settings(group_settings)
+        except ValueError as exc:
+            return _error(str(exc))
+
+        global_limit = self._daily_limit()
+        group_limits = {
+            item_group_id: int(settings[GROUP_SETTING_DAILY_LIMIT])
+            for item_group_id, settings in group_settings.items()
+            if GROUP_SETTING_DAILY_LIMIT in settings
+        }
         has_custom_limit = group_id in group_limits
         effective_limit = self._daily_limit_for_group(group_id, group_limits)
         return _ok(
@@ -1241,69 +1461,22 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
                 "custom_daily_token_limit_display": (
                     _format_tokens(group_limits[group_id]) if has_custom_limit else ""
                 ),
-            }
-        )
-
-    async def api_save_group_settings(self) -> dict:
-        payload = await request.get_json(silent=True)
-        if not isinstance(payload, dict):
-            return _error("Request body must be a JSON object.")
-
-        group_id = _normalize_group_id(payload.get("group_id"))
-        if not group_id:
-            return _error("group_id is required.")
-
-        group_limits = self._load_group_limits()
-        if bool(payload.get("reset")):
-            group_limits.pop(group_id, None)
-            try:
-                self._save_group_limits(group_limits)
-            except ValueError as exc:
-                return _error(str(exc))
-
-            global_limit = self._daily_limit()
-            return _ok(
-                {
-                    "group_id": group_id,
-                    "daily_token_limit": global_limit,
-                    "daily_token_limit_display": _format_tokens(global_limit),
-                    "global_daily_token_limit": global_limit,
-                    "global_daily_token_limit_display": _format_tokens(global_limit),
-                    "has_custom_limit": False,
-                    "custom_daily_token_limit": None,
-                    "custom_daily_token_limit_display": "",
-                    "group_limits": group_limits,
-                }
-            )
-
-        try:
-            daily_token_limit = max(0, int(payload.get("daily_token_limit") or 0))
-        except (TypeError, ValueError):
-            return _error("单个群聊每日用量上限必须是整数。")
-
-        group_limits[group_id] = daily_token_limit
-        try:
-            self._save_group_limits(group_limits)
-        except ValueError as exc:
-            return _error(str(exc))
-
-        global_limit = self._daily_limit()
-        return _ok(
-            {
-                "group_id": group_id,
-                "daily_token_limit": daily_token_limit,
-                "daily_token_limit_display": _format_tokens(daily_token_limit),
-                "global_daily_token_limit": global_limit,
-                "global_daily_token_limit_display": _format_tokens(global_limit),
-                "has_custom_limit": True,
-                "custom_daily_token_limit": daily_token_limit,
-                "custom_daily_token_limit_display": _format_tokens(daily_token_limit),
                 "group_limits": group_limits,
+                "group_settings": group_settings,
+                "only_at_bot_llm": self._group_only_at_bot_llm(
+                    group_id,
+                    group_settings,
+                ),
             }
         )
 
     @filter.on_waiting_llm_request(priority=1000)
     async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
+        if self._block_group_only_at_bot_invocation_if_needed(
+            event,
+            "waiting_llm_request",
+        ):
+            return
         self._remember_user_usage_event(event)
         if await self._block_user_daily_limit_if_needed(event, "waiting_llm_request"):
             return
@@ -1360,6 +1533,8 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
             else None
         )
         self._remember_user_usage_event(event, conversation_id=conversation_id)
+        if self._block_group_only_at_bot_invocation_if_needed(event, "llm_request"):
+            return
         if await self._block_user_daily_limit_if_needed(event, "llm_request"):
             return
         limit_context = await self._build_event_limit_context(event)

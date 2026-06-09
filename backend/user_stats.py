@@ -483,6 +483,7 @@ class UserStatsMixin:
             if rebuild
             else max(retention_start, last_synced - USER_USAGE_SYNC_OVERLAP)
         )
+        query_start = _hour_start(query_start)
         query_end = now
         if query_end <= query_start:
             self._prune_user_group_data(group_data, retention_start, query_end, query_end)
@@ -656,6 +657,90 @@ class UserStatsMixin:
             changed = True
         group_data["requests"] = candidates
         return assigned_hourly, changed
+
+    def _user_usage_request_candidates(
+        self,
+        group_data: dict[str, Any] | None,
+        now: datetime,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(group_data, dict):
+            return []
+        requests = group_data.get("requests")
+        if not isinstance(requests, list):
+            return []
+
+        cutoff = now - USER_USAGE_REQUEST_RETENTION
+        candidates: list[dict[str, Any]] = []
+        for request_item in requests:
+            if not isinstance(request_item, dict):
+                continue
+            started_at = _parse_datetime(request_item.get("started_at"))
+            if started_at is None or started_at < cutoff:
+                continue
+            user_id = _sanitize_user_id(request_item.get("user_id"))
+            request_umo = str(request_item.get("umo") or "").strip()
+            if not user_id or not request_umo:
+                continue
+            candidates.append(
+                {
+                    "_started_at_dt": started_at,
+                    "umo": request_umo[:256],
+                    "user_id": user_id,
+                    "conversation_id": str(
+                        request_item.get("conversation_id") or ""
+                    ).strip()[:128],
+                }
+            )
+        return candidates
+
+    def _cached_user_group_data(self, group_id: str) -> dict[str, Any]:
+        stats = getattr(self, "_user_cached_stats", None)
+        if not isinstance(stats, dict):
+            return {}
+        group_data = stats.get("groups", {}).get(group_id, {})
+        return group_data if isinstance(group_data, dict) else {}
+
+    def _assign_user_usage_records_to_totals(
+        self,
+        group_data: dict[str, Any] | None,
+        records: list[dict[str, Any]],
+        now: datetime,
+    ) -> dict[str, int]:
+        candidates = self._user_usage_request_candidates(group_data, now)
+        if not candidates:
+            return {}
+
+        totals: dict[str, int] = {}
+        for record in records:
+            stat_id = int(record.get("id") or 0)
+            tokens = max(0, int(record.get("tokens") or 0))
+            created_at = _to_utc_datetime(record.get("created_at"))
+            started_at = _to_utc_datetime(record.get("started_at")) or created_at
+            record_umo = str(record.get("umo") or "").strip()
+            conversation_id = str(record.get("conversation_id") or "").strip()
+            if (
+                not stat_id
+                or tokens <= 0
+                or created_at is None
+                or started_at is None
+                or not record_umo
+            ):
+                continue
+
+            matched = self._match_user_usage_request(
+                candidates,
+                stat_id,
+                record_umo,
+                started_at,
+                conversation_id,
+            )
+            if not matched:
+                continue
+            user_id = _sanitize_user_id(matched.get("user_id"))
+            if not user_id:
+                continue
+            totals[user_id] = totals.get(user_id, 0) + tokens
+        return totals
 
     @staticmethod
     def _match_user_usage_request(
@@ -831,17 +916,23 @@ class UserStatsMixin:
         self,
         group_id: str,
         window: UserUsageWindow,
+        group_data: dict[str, Any] | None = None,
     ) -> dict[str, int]:
         db = self.context.get_db()
+        now = _now_utc()
+        query_end = min(window.end_utc, now)
+        if query_end <= window.start_utc:
+            return {}
         filters = [
             ProviderStat.agent_type == "internal",
             ProviderStat.created_at >= window.start_utc,
-            ProviderStat.created_at < min(window.end_utc, _now_utc()),
+            ProviderStat.created_at < query_end,
             self._user_usage_umo_filter(group_id),
         ]
         totals: dict[str, int] = {}
+        unassigned_umos: set[str] = set()
         async with db.get_db() as session:
-            rows_result = await session.execute(
+            grouped_result = await session.execute(
                 select(
                     ProviderStat.umo,
                     func.coalesce(func.sum(USER_TOKEN_FIELDS_SUM), 0).label("tokens"),
@@ -849,11 +940,69 @@ class UserStatsMixin:
                 .where(*filters)
                 .group_by(ProviderStat.umo)
             )
-            for umo, tokens in rows_result.all():
-                user_id = _extract_user_id_from_umo(umo, group_id)
-                if not user_id:
+            for umo, tokens in grouped_result.all():
+                normalized_tokens = max(0, int(tokens or 0))
+                if normalized_tokens <= 0:
                     continue
-                totals[user_id] = totals.get(user_id, 0) + int(tokens or 0)
+                user_id = _extract_user_id_from_umo(umo, group_id)
+                if user_id:
+                    totals[user_id] = totals.get(user_id, 0) + normalized_tokens
+                    continue
+                record_umo = str(umo or "").strip()
+                if record_umo:
+                    unassigned_umos.add(record_umo)
+
+            unassigned_records: list[dict[str, Any]] = []
+            if unassigned_umos:
+                rows_result = await session.execute(
+                    select(
+                        ProviderStat.id,
+                        ProviderStat.created_at,
+                        ProviderStat.umo,
+                        ProviderStat.conversation_id,
+                        ProviderStat.start_time,
+                        USER_TOKEN_FIELDS_SUM.label("tokens"),
+                    )
+                    .where(*filters, ProviderStat.umo.in_(sorted(unassigned_umos)))
+                    .order_by(col(ProviderStat.created_at).asc())
+                )
+                for (
+                    stat_id,
+                    created_at,
+                    umo,
+                    conversation_id,
+                    start_time,
+                    tokens,
+                ) in rows_result.all():
+                    normalized_tokens = max(0, int(tokens or 0))
+                    if normalized_tokens <= 0:
+                        continue
+                    created_at_utc = _to_utc_datetime(created_at)
+                    if created_at_utc is None:
+                        continue
+                    unassigned_records.append(
+                        {
+                            "id": int(stat_id or 0),
+                            "created_at": created_at_utc,
+                            "started_at": _timestamp_to_utc(start_time),
+                            "umo": str(umo or ""),
+                            "conversation_id": str(conversation_id or ""),
+                            "tokens": normalized_tokens,
+                        }
+                    )
+        if unassigned_records:
+            source_group_data = (
+                group_data
+                if isinstance(group_data, dict)
+                else self._cached_user_group_data(group_id)
+            )
+            assigned_totals = self._assign_user_usage_records_to_totals(
+                source_group_data,
+                unassigned_records,
+                now,
+            )
+            for user_id, tokens in assigned_totals.items():
+                totals[user_id] = totals.get(user_id, 0) + tokens
         return totals
 
     def _stored_user_totals_for_group(
@@ -1063,9 +1212,13 @@ class UserStatsMixin:
             users = []
             window = _build_user_usage_window(self._config_value("refresh_time"))
             if selected_group_id:
+                group_data = stats.get("groups", {}).get(selected_group_id, {})
+                if not isinstance(group_data, dict):
+                    group_data = {}
                 realtime_totals = await self._query_user_totals_for_group(
                     selected_group_id,
                     window,
+                    group_data,
                 )
                 stored_totals = self._stored_user_totals_for_group(
                     stats,

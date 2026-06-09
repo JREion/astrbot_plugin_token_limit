@@ -48,7 +48,14 @@ class UserLimitMixin:
 
         stats = await self._maybe_sync_user_stats(force=True, group_id=group_id)
         window = _build_user_usage_window(self._config_value("refresh_time"))
-        realtime_totals = await self._query_user_totals_for_group(group_id, window)
+        group_data = stats.get("groups", {}).get(group_id, {})
+        if not isinstance(group_data, dict):
+            group_data = {}
+        realtime_totals = await self._query_user_totals_for_group(
+            group_id,
+            window,
+            group_data,
+        )
         stored_totals = self._stored_user_totals_for_group(stats, group_id, window)
         totals = self._combine_user_totals(realtime_totals, stored_totals)
         return {

@@ -2,6 +2,29 @@
 
 本文档记录每个版本对插件结构、配置、页面和运行逻辑的变动。
 
+## 0.6.2 - 2026-06-08
+
+新增单群“本群 token 节约策略”，允许管理员将某个群聊设置为仅通过 `@bot` 触发 LLM 回复。
+- `metadata.yaml`
+  - 版本号更新为 `0.6.2`。
+- `main.py`
+  - 新增 `GROUP_SETTING_DAILY_LIMIT` 与 `GROUP_SETTING_ONLY_AT_BOT` 常量。
+  - 将 `group_limits.json` 的持久化读取扩展为兼容结构：旧版 `{group_id: limit}` 仍可读取，新版以 `{group_id: {daily_token_limit, only_at_bot_llm}}` 保存群聊个性化配置。
+  - 新增 `_load_group_settings()` / `_save_group_settings()`，统一读写单群每日上限与“仅通过 @bot 触发 LLM 回复”开关。
+  - 保留 `_load_group_limits()` / `_save_group_limits()` 兼容接口，确保现有每日上限限流逻辑不需要整体重写。
+  - 新增 `_group_only_at_bot_llm()`、`_should_block_group_only_at_bot_invocation()` 与 `_block_group_only_at_bot_invocation_if_needed()`。
+  - `on_waiting_llm_request()` 和 `on_llm_request()` 在单用户限流、群聊回退/停止策略之前先执行单群 `@bot-only` 策略；当事件是唤醒词触发且未包含 `@bot` 时静默 `event.stop_event()`。
+  - 复用 `_is_wake_word_invocation()` 的边界判断：同一句消息同时包含 `@bot` 和唤醒词时不会被该策略阻断。
+  - `api_get_group_settings()` 返回 `only_at_bot_llm`；`api_save_group_settings()` 支持保存 `only_at_bot_llm`。点击“重置”只删除该群个性化每日上限，不清除 `only_at_bot_llm`。
+  - `_build_usage_payload()` 为每个群聊返回 `only_at_bot_llm` 与完整 `group_settings`，供 Plugin Page 弹窗即时渲染。
+- `pages/dashboard/index.html`
+  - “群聊个性化配置”弹窗在“单独配置本群每日用量上限”下方新增“本群 token 节约策略”栏目。
+  - 新增 `#groupOnlyAtBotInput` 复选框，显示“仅通过 @bot 触发 LLM 回复”，默认不勾选。
+  - `openGroupSettings()` 会先使用用量列表中的缓存值渲染，再通过 `group-settings` API 刷新准确状态。
+  - `saveGroupSettings()` 同时比较每日上限和 `only_at_bot_llm`，任一变化都会提交；`resetGroupSettings()` 仍只重置每日上限。
+- `README.md` / `STRUCTURE.md`
+  - 补充 v0.6.2 的行为说明、持久化文件结构、后端函数、Web API 字段和页面元素映射。
+
 ## 0.6.1 - 2026-06-08
 
 新增“单个用户每日用量上限”能力。

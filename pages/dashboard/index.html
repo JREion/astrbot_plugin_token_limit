@@ -508,6 +508,21 @@
         align-items: center;
       }
 
+      .group-settings-section {
+        border-top: 1px solid var(--line);
+        padding-top: 12px;
+      }
+
+      .group-settings-section-title {
+        font-weight: 700;
+        margin-bottom: 10px;
+      }
+
+      .group-settings-checkbox {
+        align-items: flex-start;
+        line-height: 1.45;
+      }
+
       .strategy-form {
         display: grid;
         gap: 0;
@@ -1208,6 +1223,13 @@
               </div>
             </div>
             <div id="groupSettingsHint" class="group-settings-hint"></div>
+            <div class="group-settings-section">
+              <div class="group-settings-section-title">本群 token 节约策略</div>
+              <label class="switch group-settings-checkbox">
+                <input id="groupOnlyAtBotInput" type="checkbox" />
+                <span>仅通过 @bot 触发 LLM 回复</span>
+              </label>
+            </div>
             <div id="groupSettingsToast" class="toast"></div>
           </div>
         </div>
@@ -1233,6 +1255,7 @@
         currentSettingsGroupId: "",
         currentSettingsInitialLimit: null,
         currentSettingsHasCustomLimit: false,
+        currentSettingsInitialOnlyAtBot: false,
         history: {
           groups: [],
           selectedGroupId: "",
@@ -1291,6 +1314,7 @@
       const groupSettingsTarget = document.getElementById("groupSettingsTarget");
       const groupLimitInput = document.getElementById("groupLimitInput");
       const resetGroupLimitBtn = document.getElementById("resetGroupLimitBtn");
+      const groupOnlyAtBotInput = document.getElementById("groupOnlyAtBotInput");
       const groupSettingsHint = document.getElementById("groupSettingsHint");
       const groupSettingsToast = document.getElementById("groupSettingsToast");
       const historyTooltip = document.getElementById("historyTooltip");
@@ -2292,6 +2316,8 @@
           groupLimitInput.value || "0",
           10,
         );
+        groupOnlyAtBotInput.checked = Boolean(group.only_at_bot_llm);
+        state.currentSettingsInitialOnlyAtBot = groupOnlyAtBotInput.checked;
         setGroupSettingsResetEnabled(group.has_custom_limit);
         groupSettingsHint.textContent = group.has_custom_limit
           ? "当前使用该群聊的个性化上限；保存后不会随全局上限变化。"
@@ -2309,6 +2335,8 @@
             10,
           );
           setGroupSettingsResetEnabled(payload.has_custom_limit);
+          groupOnlyAtBotInput.checked = Boolean(payload.only_at_bot_llm);
+          state.currentSettingsInitialOnlyAtBot = groupOnlyAtBotInput.checked;
           groupSettingsHint.textContent = payload.has_custom_limit
             ? "当前使用该群聊的个性化上限；保存后不会随全局上限变化。"
             : `当前显示全局上限：${payload.global_daily_token_limit_display || ""}`;
@@ -2326,8 +2354,10 @@
         groupSettingsOverlay.classList.remove("open");
         state.currentSettingsGroupId = "";
         state.currentSettingsInitialLimit = null;
+        state.currentSettingsInitialOnlyAtBot = false;
         setGroupSettingsResetEnabled(false);
         groupLimitInput.value = "";
+        groupOnlyAtBotInput.checked = false;
         groupSettingsHint.textContent = "";
         setGroupSettingsToast("");
       }
@@ -2384,14 +2414,24 @@
           setGroupSettingsToast("保存中...");
           const value = Number.parseInt(groupLimitInput.value || "0", 10);
           const nextValue = Number.isNaN(value) ? 0 : value;
-          if (nextValue === state.currentSettingsInitialLimit) {
+          const nextOnlyAtBot = Boolean(groupOnlyAtBotInput.checked);
+          if (
+            nextValue === state.currentSettingsInitialLimit &&
+            nextOnlyAtBot === state.currentSettingsInitialOnlyAtBot
+          ) {
             closeGroupSettings();
             return;
           }
-          await api.apiPost("group-settings", {
+          const payload = {
             group_id: state.currentSettingsGroupId,
-            daily_token_limit: nextValue,
-          });
+          };
+          if (nextValue !== state.currentSettingsInitialLimit) {
+            payload.daily_token_limit = nextValue;
+          }
+          if (nextOnlyAtBot !== state.currentSettingsInitialOnlyAtBot) {
+            payload.only_at_bot_llm = nextOnlyAtBot;
+          }
+          await api.apiPost("group-settings", payload);
           closeGroupSettings();
           await loadUsage();
         } catch (error) {
