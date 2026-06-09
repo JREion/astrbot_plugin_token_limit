@@ -523,6 +523,11 @@
         line-height: 1.45;
       }
 
+      .group-settings-inline-note {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
       .strategy-form {
         display: grid;
         gap: 0;
@@ -1113,6 +1118,10 @@
         color: var(--red);
       }
 
+      .toast.warning {
+        color: var(--yellow-dark);
+      }
+
       @media (max-width: 860px) {
         .app {
           padding: 14px;
@@ -1417,6 +1426,13 @@
                 <input id="groupOnlyAtBotInput" type="checkbox" />
                 <span>仅通过 @bot 触发 LLM 回复</span>
               </label>
+              <label class="switch group-settings-checkbox">
+                <input id="groupContextLimitInput" type="checkbox" />
+                <span>
+                  最大上下文窗口设置为额度的 0.5%
+                  <span id="groupContextLimitValue" class="group-settings-inline-note"></span>
+                </span>
+              </label>
             </div>
             <div id="groupSettingsToast" class="toast"></div>
           </div>
@@ -1444,6 +1460,7 @@
         currentSettingsInitialLimit: null,
         currentSettingsHasCustomLimit: false,
         currentSettingsInitialOnlyAtBot: false,
+        currentSettingsInitialContextLimit05: false,
         history: {
           groups: [],
           selectedGroupId: "",
@@ -1513,6 +1530,8 @@
       const groupLimitInput = document.getElementById("groupLimitInput");
       const resetGroupLimitBtn = document.getElementById("resetGroupLimitBtn");
       const groupOnlyAtBotInput = document.getElementById("groupOnlyAtBotInput");
+      const groupContextLimitInput = document.getElementById("groupContextLimitInput");
+      const groupContextLimitValue = document.getElementById("groupContextLimitValue");
       const groupSettingsHint = document.getElementById("groupSettingsHint");
       const groupSettingsToast = document.getElementById("groupSettingsToast");
       const historyTooltip = document.getElementById("historyTooltip");
@@ -1535,14 +1554,62 @@
         remarkToast.classList.toggle("error", Boolean(isError));
       }
 
-      function setGroupSettingsToast(message, isError = false) {
+      function setGroupSettingsToast(message, isError = false, isWarning = false) {
         groupSettingsToast.textContent = message || "";
         groupSettingsToast.classList.toggle("error", Boolean(isError));
+        groupSettingsToast.classList.toggle("warning", Boolean(isWarning));
+        groupSettingsToast.dataset.priority = message && !isWarning ? "manual" : "";
       }
 
       function setGroupSettingsResetEnabled(enabled) {
         state.currentSettingsHasCustomLimit = Boolean(enabled);
         resetGroupLimitBtn.disabled = !state.currentSettingsHasCustomLimit;
+      }
+
+      function groupContextLimitDisplay(limitTokens) {
+        const tokens = groupContextLimitTokens(limitTokens);
+        if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(2)}M`;
+        return `${Math.max(1, Math.round(tokens / 1000))}K`;
+      }
+
+      function groupContextLimitTokens(limitTokens) {
+        return Math.max(1, Math.floor(Number(limitTokens || 0) * 0.005));
+      }
+
+      function currentGroupContextLimitTokens() {
+        const value = Number.parseInt(groupLimitInput.value || "0", 10);
+        const limitTokens = Number.isNaN(value) ? 0 : value;
+        return groupContextLimitTokens(limitTokens);
+      }
+
+      function groupContextLimitWarningMessage() {
+        if (!groupContextLimitInput.checked) return "";
+        const tokens = currentGroupContextLimitTokens();
+        if (tokens < 15000) {
+          return "警告：LLM 上下文窗口过短，可能显著降低 bot 记忆能力。";
+        }
+        if (tokens >= 200000) {
+          return "警告：LLM 上下文窗口较长，可能显著增加 token 用量。";
+        }
+        return "";
+      }
+
+      function updateGroupContextLimitWarning() {
+        if (groupSettingsToast.dataset.priority === "manual") return;
+        const message = groupContextLimitWarningMessage();
+        setGroupSettingsToast(message, false, Boolean(message));
+      }
+
+      function clearGroupSettingsToast() {
+        groupSettingsToast.dataset.priority = "";
+        updateGroupContextLimitWarning();
+      }
+
+      function updateGroupContextLimitValue() {
+        const value = Number.parseInt(groupLimitInput.value || "0", 10);
+        const limitTokens = Number.isNaN(value) ? 0 : value;
+        groupContextLimitValue.textContent = `(${groupContextLimitDisplay(limitTokens)})`;
+        updateGroupContextLimitWarning();
       }
 
       function createPencilIcon() {
@@ -2632,12 +2699,15 @@
         );
         groupOnlyAtBotInput.checked = Boolean(group.only_at_bot_llm);
         state.currentSettingsInitialOnlyAtBot = groupOnlyAtBotInput.checked;
+        groupContextLimitInput.checked = Boolean(group.context_limit_05);
+        state.currentSettingsInitialContextLimit05 = groupContextLimitInput.checked;
+        updateGroupContextLimitValue();
         setGroupSettingsResetEnabled(group.has_custom_limit);
         groupSettingsHint.textContent = group.has_custom_limit
           ? "当前使用该群聊的个性化上限；保存后不会随全局上限变化。"
           : `当前显示全局上限：${group.global_limit_display || group.primary_limit_display || ""}`;
-        setGroupSettingsToast("");
         groupSettingsOverlay.classList.add("open");
+        clearGroupSettingsToast();
 
         try {
           const payload = await api.apiGet("group-settings", {
@@ -2651,9 +2721,12 @@
           setGroupSettingsResetEnabled(payload.has_custom_limit);
           groupOnlyAtBotInput.checked = Boolean(payload.only_at_bot_llm);
           state.currentSettingsInitialOnlyAtBot = groupOnlyAtBotInput.checked;
+          groupContextLimitInput.checked = Boolean(payload.context_limit_05);
+          state.currentSettingsInitialContextLimit05 = groupContextLimitInput.checked;
           groupSettingsHint.textContent = payload.has_custom_limit
             ? "当前使用该群聊的个性化上限；保存后不会随全局上限变化。"
             : `当前显示全局上限：${payload.global_daily_token_limit_display || ""}`;
+          updateGroupContextLimitValue();
         } catch (error) {
           setGroupSettingsToast(error.message || String(error), true);
         }
@@ -2669,9 +2742,12 @@
         state.currentSettingsGroupId = "";
         state.currentSettingsInitialLimit = null;
         state.currentSettingsInitialOnlyAtBot = false;
+        state.currentSettingsInitialContextLimit05 = false;
         setGroupSettingsResetEnabled(false);
         groupLimitInput.value = "";
         groupOnlyAtBotInput.checked = false;
+        groupContextLimitInput.checked = false;
+        groupContextLimitValue.textContent = "";
         groupSettingsHint.textContent = "";
         setGroupSettingsToast("");
       }
@@ -2729,9 +2805,11 @@
           const value = Number.parseInt(groupLimitInput.value || "0", 10);
           const nextValue = Number.isNaN(value) ? 0 : value;
           const nextOnlyAtBot = Boolean(groupOnlyAtBotInput.checked);
+          const nextContextLimit05 = Boolean(groupContextLimitInput.checked);
           if (
             nextValue === state.currentSettingsInitialLimit &&
-            nextOnlyAtBot === state.currentSettingsInitialOnlyAtBot
+            nextOnlyAtBot === state.currentSettingsInitialOnlyAtBot &&
+            nextContextLimit05 === state.currentSettingsInitialContextLimit05
           ) {
             closeGroupSettings();
             return;
@@ -2744,6 +2822,9 @@
           }
           if (nextOnlyAtBot !== state.currentSettingsInitialOnlyAtBot) {
             payload.only_at_bot_llm = nextOnlyAtBot;
+          }
+          if (nextContextLimit05 !== state.currentSettingsInitialContextLimit05) {
+            payload.context_limit_05 = nextContextLimit05;
           }
           await api.apiPost("group-settings", payload);
           closeGroupSettings();
@@ -2803,6 +2884,8 @@
         .getElementById("saveGroupSettingsBtn")
         .addEventListener("click", saveGroupSettings);
       resetGroupLimitBtn.addEventListener("click", resetGroupSettings);
+      groupLimitInput.addEventListener("input", updateGroupContextLimitValue);
+      groupContextLimitInput.addEventListener("change", updateGroupContextLimitWarning);
       groupSelectTrigger.addEventListener("click", (event) => {
         event.stopPropagation();
         toggleCustomSelect(groupSelect);

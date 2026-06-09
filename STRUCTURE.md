@@ -1,6 +1,6 @@
 ﻿# STRUCTURE
 
-鏈枃妗ｈ褰?v0.6.3 鐗堟湰鐨勬彃浠剁粨鏋勩€佸唴閮?API銆侀〉闈㈠厓绱犳槧灏勫拰涓昏鍑芥暟鑱岃矗銆?
+鏈枃妗ｈ褰?v0.6.4 鐗堟湰鐨勬彃浠剁粨鏋勩€佸唴閮?API銆侀〉闈㈠厓绱犳槧灏勫拰涓昏鍑芥暟鑱岃矗銆?
 ## 鏂囦欢缁撴瀯
 
 ```text
@@ -37,7 +37,7 @@ astrbot_plugin_token_limit/
 
 ### metadata.yaml
 
-- `name`锛氭彃浠跺悕绉帮紝褰撳墠涓?`astrbot_plugin_token_limit`銆?- `version`锛氬綋鍓嶇増鏈?`0.6.3`銆?- `repo`锛氭彃浠朵粨搴撳湴鍧€銆?- `support_platforms`锛氶粯璁ゆ敮鎸?`aiocqhttp`銆乣qq_official`銆乣qq_official_webhook`銆?- `pages`锛氬０鏄?`dashboard` Plugin Page锛岄〉闈㈡枃浠朵负 `pages/dashboard/index.html`銆?
+- `name`锛氭彃浠跺悕绉帮紝褰撳墠涓?`astrbot_plugin_token_limit`銆?- `version`锛氬綋鍓嶇増鏈?`0.6.4`銆?- `repo`锛氭彃浠朵粨搴撳湴鍧€銆?- `support_platforms`锛氶粯璁ゆ敮鎸?`aiocqhttp`銆乣qq_official`銆乣qq_official_webhook`銆?- `pages`锛氬０鏄?`dashboard` Plugin Page锛岄〉闈㈡枃浠朵负 `pages/dashboard/index.html`銆?
 ### _conf_schema.json
 
 鍘熺敓 WebUI 閰嶇疆椤癸細
@@ -205,6 +205,70 @@ astrbot_plugin_token_limit/
   - `openGroupSettings()` 从 `usage` 缓存和 `group-settings` API 读取 `only_at_bot_llm`。
   - `saveGroupSettings()` 同时保存 `daily_token_limit` 与 `only_at_bot_llm`；任一字段变化都会提交。
   - `resetGroupSettings()` 仍只提交 `reset=true`，仅重置本群每日上限为全局值。
+
+## v0.6.4 补充结构说明
+
+- `metadata.yaml` 当前版本为 `0.6.4`。
+- `group_limits.json` 的单群配置结构继续兼容旧格式，并新增可选字段：
+  - `context_limit_05`：布尔值，`true` 表示该群启用“最大上下文窗口设置为额度的 0.5%”。
+  - 示例：`{"123456": {"daily_token_limit": 6000000, "only_at_bot_llm": true, "context_limit_05": true}}`。
+  - `daily_token_limit` 缺省时，该群上下文限制值随全局 `daily_token_limit` 实时变化；存在个性化上限时，按该群个性化上限计算。
+- `main.py` 新增常量：
+  - `GROUP_SETTING_CONTEXT_LIMIT_05 = "context_limit_05"`。
+  - `TOKEN_LIMIT_CONTEXT_RATIO = 0.005`。
+  - `TOKEN_LIMIT_CONTEXT_TRIM_RATIO = 0.8`。
+  - `TOKEN_LIMIT_CONTEXT_COMPRESS_THRESHOLD = 0.82`。
+  - `TOKEN_LIMIT_CONTEXT_FALLBACK_TURNS = 3`。
+  - `TOKEN_LIMIT_TEMP_PROVIDER_PREFIX = "__token_limit_context__"`。
+- `main.py` 新增或扩展内部 API：
+  - `_group_context_limit_05(group_id, group_settings=None)`：读取某群是否启用 0.5% 上下文窗口策略。
+  - `_group_context_limit_tokens(group_id, group_settings=None, group_limits=None)`：返回某群有效每日上限的 0.5%，未启用时返回 `0`。
+  - `_format_context_limit_tokens(value)`：将上下文窗口限制值格式化为无空格 K/M 文本，小于 1000 token 时显示为 `1K`。
+  - `_provider_id_for_context_limit(event, limit_context)`：优先尊重事件上已有的 `selected_provider`；正常区间选择 AstrBot 当前 provider，回退区间且回退 provider 有效时选择回退 provider。
+  - `_apply_context_limit_provider_if_needed(event, limit_context)`：为当前请求创建 provider 浅拷贝，复制 `provider_config` 并写入临时 `max_context_tokens`，再通过 `selected_provider` 指向临时 provider。
+  - `_set_temp_context_provider_limit(event, context_tokens)`：仅修改本次临时 provider 副本的 `max_context_tokens`，用于必需输入过大时避免 AstrBot 无意义压缩。
+  - `_context_limit_trim_budget(tokens)`：返回上下文预裁剪预算，当前为限制值的 80%。
+  - `_context_limit_compress_threshold(tokens)` / `_context_limit_for_tokens(tokens)`：按 AstrBot 默认 0.82 压缩阈值计算触发线和可容纳当前估算消息的临时窗口。
+  - `_estimate_text_tokens(value)` / `_estimate_content_tokens(content)`：用轻量规则估算文本、多模态消息片段和附件描述 token 数，避免为预裁剪引入额外模型调用。
+  - `_estimate_request_messages_tokens(req, history_messages)`：轻量估算系统提示、历史上下文、当前输入和附件描述的 token 数。
+  - `_drop_oldest_context_turn(messages)`：按最旧历史轮次裁剪，尽量保留最近对话。
+  - `_keep_recent_context_turns(messages, turns)`：兜底阶段保留最近 N 轮历史，当前用于仍超过压缩阈值时至少保留最近 3 轮。
+  - `_clear_request_conversation_token_usage(req)`：将本次请求绑定会话的 `token_usage` 缓存清零，避免旧缓存继续触发 AstrBot 压缩判断。
+  - `_trim_provider_request_context_if_needed(event, req, limit_context)`：仅裁剪当前 `ProviderRequest.contexts` 中的旧历史轮次，不写回持久化会话历史；先尽量裁到 80% 预算内，若仍超过 AstrBot 压缩阈值则保留最近 3 轮并只抬高本次临时窗口；日志以单行输出。
+  - `_cleanup_temp_context_provider(event)`：从 `provider_manager.inst_map` 与 `provider_insts` 中移除临时 provider，并把 `selected_provider` 恢复为原始 provider ID。
+  - `_cleanup_temp_context_provider_later(event, temp_provider_id)`：异常路径兜底清理临时 provider，避免请求未进入 LLM 钩子时残留注册项。
+- LLM 请求处理顺序：
+  - `on_waiting_llm_request()` 在 AstrBot 构建主 agent 之前执行，因此负责为启用策略的群聊预先选择临时 provider。
+  - 群聊状态为 `normal` 时，临时 provider 基于当前 AstrBot 默认 provider 创建。
+  - 群聊状态为 `fallback` 且回退 provider 有效时，临时 provider 基于回退 provider 创建。
+  - 群聊状态为 `stopped` 时不创建临时 provider。
+  - `on_llm_request()` 在 `normal` / `fallback` 放行前执行历史上下文预裁剪；必要时先抬高本次临时 provider 窗口，再清理 provider 注册表临时项，使后续 `reset_coro` 组装 messages 时使用较短历史并尽量避开 `ContextManager` 压缩。
+- `GET /astrbot_plugin_token_limit/usage` 的每个群聊项增加：
+  - `context_limit_05`：当前群是否启用上下文窗口 0.5% 策略。
+  - `context_limit_tokens`：当前策略启用时的实际上下文 token 数；未启用时为 `0`。
+  - `context_limit_display`：用于页面显示的 0.5% 限制值，按无空格 K/M 格式化。
+- `GET /astrbot_plugin_token_limit/group-settings` 返回字段增加：
+  - `context_limit_05`、`context_limit_tokens`、`context_limit_display`。
+- `POST /astrbot_plugin_token_limit/group-settings` 支持字段增加：
+  - `context_limit_05`：布尔值，只保存上下文窗口节约策略，不会自动改写 `daily_token_limit`。
+  - `reset=true` 只重置 `daily_token_limit`，不会清除 `only_at_bot_llm` 或 `context_limit_05`。
+- `pages/dashboard/index.html` 新增页面元素：
+  - `#groupContextLimitInput`：复选框“最大上下文窗口设置为额度的 0.5%”。
+  - `#groupContextLimitValue`：显示限制后的 K/M 数值，例如 `(30K)`。
+  - `.group-settings-inline-note`：浅色小字号说明样式。
+  - `.toast.warning`：黄色警告提示样式，复用 `#groupSettingsToast`。
+- `pages/dashboard/index.html` 新增或扩展前端函数：
+  - `groupContextLimitDisplay(limitTokens)`：按当前输入的群聊每日上限计算 0.5% 并格式化为 K/M。
+  - `updateGroupContextLimitValue()`：在打开弹窗、API 回填和输入框变化时刷新括号数值。
+  - `groupContextLimitWarningMessage()` / `updateGroupContextLimitWarning()`：根据勾选状态和限制值显示短上下文或长上下文黄色警告。
+  - `openGroupSettings()`：从 usage 缓存和 `group-settings` API 读取 `context_limit_05`，并渲染当前限制值。
+  - `saveGroupSettings()`：独立比较并提交 `context_limit_05`，避免只改节约策略时误把每日上限变成个性化配置。
+- 页面交互规则：
+  - 未勾选“最大上下文窗口设置为额度的 0.5%”时，该群继续使用 AstrBot provider 默认 `max_context_tokens`。
+  - 勾选后，括号中的限制值随“单独配置本群每日用量上限”输入框即时更新；保存后后端按最终有效上限实时计算。
+  - 勾选后，限制值 `< 15K` 时提示回复延迟风险，限制值 `>= 200K` 时提示 token 用量风险；保存中、重置中和错误提示优先于黄色警告。
+  - 如果该群未设置个性化每日上限，后续修改全局 `daily_token_limit` 会同步改变该群上下文限制值。
+  - 如果该群已设置个性化每日上限，后续修改全局 `daily_token_limit` 不影响该群上下文限制值。
 
 ## v0.6.3 补充结构说明
 

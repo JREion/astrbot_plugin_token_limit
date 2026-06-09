@@ -2,6 +2,32 @@
 
 本文档记录每个版本对插件结构、配置、页面和运行逻辑的变动。
 
+## 0.6.4 - 2026-06-09
+
+新增单群上下文窗口节约策略，可将某个群聊的 LLM 请求上下文窗口限制为该群有效每日额度的 0.5%。
+- `metadata.yaml`
+  - 版本号更新为 `0.6.4`。
+- `main.py`
+  - 新增 `GROUP_SETTING_CONTEXT_LIMIT_05`、`TOKEN_LIMIT_CONTEXT_RATIO`、`TOKEN_LIMIT_CONTEXT_COMPRESS_THRESHOLD`、`TOKEN_LIMIT_CONTEXT_FALLBACK_TURNS` 与 `TOKEN_LIMIT_TEMP_PROVIDER_PREFIX` 常量。
+  - `_load_group_settings()` / `_save_group_settings()` 继续兼容旧结构，并保存 `context_limit_05` 布尔开关。
+  - `_save_group_limits()` 保存每日上限时会保留 `only_at_bot_llm` 与 `context_limit_05`，避免两个个性化配置互相覆盖。
+  - 新增 `_group_context_limit_05()` 与 `_group_context_limit_tokens()`，按单群有效每日上限实时计算 0.5% 上下文窗口。
+  - 新增 `_provider_id_for_context_limit()`、`_apply_context_limit_provider_if_needed()`、`_cleanup_temp_context_provider()` 与 `_cleanup_temp_context_provider_later()`。
+  - `on_waiting_llm_request()` 在 AstrBot 构建主 agent 前，为启用策略的群聊临时注册 provider 副本并写入 `selected_provider`；副本只修改本次请求的 `max_context_tokens`，不写回原 provider。
+  - 回退区间会优先基于回退 provider 创建临时副本；正常区间基于当前 AstrBot 默认 provider 创建临时副本；停止响应状态不创建临时副本。
+  - `on_llm_request()` 在清理 provider 注册表中的临时副本前，先完成历史上下文预裁剪和必要时的本次窗口抬高；清理只移除注册表临时项，不写回原 provider。
+  - 新增 `_context_limit_trim_budget()`、`_context_limit_compress_threshold()`、`_context_limit_for_tokens()`、`_estimate_text_tokens()`、`_estimate_content_tokens()`、`_estimate_request_messages_tokens()`、`_drop_oldest_context_turn()`、`_keep_recent_context_turns()`、`_set_temp_context_provider_limit()`、`_clear_request_conversation_token_usage()` 与 `_trim_provider_request_context_if_needed()`；启用上下文窗口策略的群聊会先尽量按 80% 预算裁剪旧历史，若仍超过 AstrBot 压缩阈值则保留最近 3 轮并只抬高本次临时 provider 窗口，同时清理 `conversation.token_usage` 缓存。
+  - `usage` 与 `group-settings` API 返回 `context_limit_05`、`context_limit_tokens`、`context_limit_display`。
+- `pages/dashboard/index.html`
+  - “群聊个性化配置”弹窗的“本群 token 节约策略”栏目新增 `#groupContextLimitInput` 复选框。
+  - 复选框文字后新增 `#groupContextLimitValue`，以浅色小字显示当前额度 0.5% 对应的 K/M 数值。
+  - 当勾选后限制值小于 `15K` 或大于等于 `200K` 时，`#groupSettingsToast` 显示黄色上下文窗口警告；保存中、重置中和错误提示优先。
+  - `openGroupSettings()` 从 usage 缓存和 `group-settings` API 读取上下文窗口策略。
+  - `saveGroupSettings()` 单独比较并提交 `context_limit_05`，不会误触发每日上限独立配置状态。
+  - `groupLimitInput` 输入时实时刷新括号中的限制值。
+- `README.md` / `STRUCTURE.md`
+  - 补充 v0.6.4 单群上下文窗口策略、持久化字段、API 字段、页面元素和 LLM 钩子运行逻辑。
+
 ## 0.6.3 - 2026-06-09
 
 扩展“今日用户 token 用量统计”，为用户排行补充有效 LLM 请求的对话明细。

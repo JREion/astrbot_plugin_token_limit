@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import asyncio
+import copy
+import math
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -40,6 +42,14 @@ GROUP_LIMITS_FILE = "group_limits.json"
 MAX_GROUP_REMARK_LENGTH = 64
 GROUP_SETTING_DAILY_LIMIT = "daily_token_limit"
 GROUP_SETTING_ONLY_AT_BOT = "only_at_bot_llm"
+GROUP_SETTING_CONTEXT_LIMIT_05 = "context_limit_05"
+TOKEN_LIMIT_CONTEXT_RATIO = 0.005
+TOKEN_LIMIT_CONTEXT_TRIM_RATIO = 0.8
+TOKEN_LIMIT_CONTEXT_COMPRESS_THRESHOLD = 0.82
+TOKEN_LIMIT_CONTEXT_FALLBACK_TURNS = 3
+TOKEN_LIMIT_TEMP_PROVIDER_PREFIX = "__token_limit_context__"
+TOKEN_LIMIT_IMAGE_TOKEN_ESTIMATE = 765
+TOKEN_LIMIT_AUDIO_TOKEN_ESTIMATE = 500
 OVER_LIMIT_STOP = "stop_llm"
 OVER_LIMIT_FALLBACK = "fallback_provider"
 TOKEN_FIELDS_SUM = (
@@ -196,6 +206,13 @@ def _format_tokens(value: int) -> str:
     if value >= 1_000:
         return f"{value / 1_000:.2f} K"
     return str(value)
+
+
+def _format_context_limit_tokens(value: int) -> str:
+    value = max(1, int(value or 0))
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M"
+    return f"{max(1, round(value / 1_000))}K"
 
 
 def _parse_refresh_time(value: Any) -> time:
@@ -389,6 +406,8 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
                         pass
                 if bool(value.get(GROUP_SETTING_ONLY_AT_BOT, False)):
                     item[GROUP_SETTING_ONLY_AT_BOT] = True
+                if bool(value.get(GROUP_SETTING_CONTEXT_LIMIT_05, False)):
+                    item[GROUP_SETTING_CONTEXT_LIMIT_05] = True
                 if item:
                     settings[normalized_group_id] = item
                 continue
@@ -414,6 +433,8 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
                 )
             if bool(value.get(GROUP_SETTING_ONLY_AT_BOT, False)):
                 item[GROUP_SETTING_ONLY_AT_BOT] = True
+            if bool(value.get(GROUP_SETTING_CONTEXT_LIMIT_05, False)):
+                item[GROUP_SETTING_CONTEXT_LIMIT_05] = True
             if item:
                 normalized_settings[normalized_group_id] = item
         try:
@@ -436,8 +457,13 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
         current_settings = self._load_group_settings()
         next_settings: dict[str, dict[str, Any]] = {}
         for group_id, settings in current_settings.items():
+            item: dict[str, Any] = {}
             if bool(settings.get(GROUP_SETTING_ONLY_AT_BOT, False)):
-                next_settings[group_id] = {GROUP_SETTING_ONLY_AT_BOT: True}
+                item[GROUP_SETTING_ONLY_AT_BOT] = True
+            if bool(settings.get(GROUP_SETTING_CONTEXT_LIMIT_05, False)):
+                item[GROUP_SETTING_CONTEXT_LIMIT_05] = True
+            if item:
+                next_settings[group_id] = item
         for group_id, limit in limits.items():
             normalized_group_id = _normalize_group_id(group_id)
             if not normalized_group_id:
@@ -519,6 +545,35 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
             )
         )
 
+    def _group_context_limit_05(
+        self,
+        group_id: str,
+        group_settings: dict[str, dict[str, Any]] | None = None,
+    ) -> bool:
+        normalized_group_id = _normalize_group_id(group_id)
+        settings = (
+            group_settings
+            if group_settings is not None
+            else self._load_group_settings()
+        )
+        return bool(
+            settings.get(normalized_group_id, {}).get(
+                GROUP_SETTING_CONTEXT_LIMIT_05,
+                False,
+            )
+        )
+
+    def _group_context_limit_tokens(
+        self,
+        group_id: str,
+        group_settings: dict[str, dict[str, Any]] | None = None,
+        group_limits: dict[str, int] | None = None,
+    ) -> int:
+        if not self._group_context_limit_05(group_id, group_settings):
+            return 0
+        limit = self._daily_limit_for_group(group_id, group_limits)
+        return max(1, int(limit * TOKEN_LIMIT_CONTEXT_RATIO))
+
     def _over_limit_policy(self) -> dict[str, Any]:
         raw_policy = self._config_value("over_limit_policy")
         default_policy = CONFIG_SCHEMA["over_limit_policy"]["default"]
@@ -564,6 +619,414 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
             return False
         provider = get_provider_by_id(provider_id)
         return provider is not None and hasattr(provider, "text_chat")
+
+    def _provider_id_for_context_limit(
+        self,
+        event: AstrMessageEvent,
+        limit_context: dict[str, Any],
+    ) -> str:
+        limit_state = limit_context.get("limit_state", {})
+        if (
+            limit_state.get("status") == "fallback"
+            and limit_context.get("fallback_provider_valid")
+        ):
+            return str(limit_context.get("fallback_provider_id") or "").strip()
+        selected_provider_id = str(
+            self._event_get_extra(event, "selected_provider") or ""
+        ).strip()
+        if (
+            selected_provider_id
+            and not selected_provider_id.startswith(TOKEN_LIMIT_TEMP_PROVIDER_PREFIX)
+        ):
+            return selected_provider_id
+        try:
+            provider = self.context.get_using_provider(
+                umo=getattr(event, "unified_msg_origin", None),
+            )
+        except Exception:
+            provider = None
+        provider_config = getattr(provider, "provider_config", None)
+        if isinstance(provider_config, dict):
+            provider_id = str(provider_config.get("id") or "").strip()
+            if provider_id:
+                return provider_id
+        try:
+            provider_meta = provider.meta()
+            return str(getattr(provider_meta, "id", "") or "").strip()
+        except Exception:
+            return ""
+
+    def _cleanup_temp_context_provider(self, event: AstrMessageEvent) -> None:
+        temp_provider_id = self._event_get_extra(
+            event,
+            "token_limit_temp_context_provider_id",
+        )
+        if not temp_provider_id:
+            return
+        provider_manager = getattr(self.context, "provider_manager", None)
+        inst_map = getattr(provider_manager, "inst_map", None)
+        provider_insts = getattr(provider_manager, "provider_insts", None)
+        if isinstance(inst_map, dict):
+            temp_provider = inst_map.pop(str(temp_provider_id), None)
+        else:
+            temp_provider = None
+        if isinstance(provider_insts, list) and temp_provider in provider_insts:
+            provider_insts.remove(temp_provider)
+        selected_provider_id = str(
+            self._event_get_extra(event, "selected_provider") or ""
+        )
+        origin_provider_id = str(
+            self._event_get_extra(event, "token_limit_context_provider_origin")
+            or ""
+        )
+        had_selected_provider = bool(
+            self._event_get_extra(event, "token_limit_context_provider_had_selected")
+        )
+        if selected_provider_id == str(temp_provider_id):
+            event.set_extra(
+                "selected_provider",
+                origin_provider_id if had_selected_provider else "",
+            )
+        event.set_extra("token_limit_temp_context_provider_id", "")
+        event.set_extra("token_limit_context_provider_origin", "")
+        event.set_extra("token_limit_context_tokens", 0)
+        event.set_extra("token_limit_context_provider_had_selected", False)
+
+    def _set_temp_context_provider_limit(
+        self,
+        event: AstrMessageEvent,
+        context_tokens: int,
+    ) -> bool:
+        temp_provider_id = str(
+            self._event_get_extra(event, "token_limit_temp_context_provider_id") or ""
+        )
+        if not temp_provider_id:
+            return False
+        provider_manager = getattr(self.context, "provider_manager", None)
+        inst_map = getattr(provider_manager, "inst_map", None)
+        if not isinstance(inst_map, dict):
+            return False
+        provider = inst_map.get(temp_provider_id)
+        if provider is None:
+            return False
+        provider_config = getattr(provider, "provider_config", None)
+        if not isinstance(provider_config, dict):
+            return False
+
+        effective_context = max(1, int(context_tokens))
+        provider_config["max_context_tokens"] = effective_context
+        try:
+            provider.max_context_tokens = effective_context
+        except Exception:
+            pass
+        event.set_extra("token_limit_context_tokens", effective_context)
+        return True
+
+    async def _cleanup_temp_context_provider_later(
+        self,
+        event: AstrMessageEvent,
+        temp_provider_id: str,
+    ) -> None:
+        await asyncio.sleep(60)
+        current_temp_provider_id = self._event_get_extra(
+            event,
+            "token_limit_temp_context_provider_id",
+        )
+        if str(current_temp_provider_id or "") == temp_provider_id:
+            self._cleanup_temp_context_provider(event)
+
+    def _apply_context_limit_provider_if_needed(
+        self,
+        event: AstrMessageEvent,
+        limit_context: dict[str, Any],
+    ) -> None:
+        group_id = str(limit_context.get("group_id") or "")
+        group_settings = self._load_group_settings()
+        group_limits = {
+            item_group_id: int(settings[GROUP_SETTING_DAILY_LIMIT])
+            for item_group_id, settings in group_settings.items()
+            if GROUP_SETTING_DAILY_LIMIT in settings
+        }
+        context_limit_tokens = self._group_context_limit_tokens(
+            group_id,
+            group_settings,
+            group_limits,
+        )
+        if context_limit_tokens <= 0:
+            self._cleanup_temp_context_provider(event)
+            return
+
+        previous_selected_provider_id = str(
+            self._event_get_extra(event, "selected_provider") or ""
+        ).strip()
+        provider_id = self._provider_id_for_context_limit(event, limit_context)
+        if not provider_id:
+            return
+        provider = self.context.get_provider_by_id(provider_id)
+        if provider is None or not hasattr(provider, "text_chat"):
+            return
+        provider_config = getattr(provider, "provider_config", None)
+        if not isinstance(provider_config, dict):
+            return
+
+        self._cleanup_temp_context_provider(event)
+        temp_provider = copy.copy(provider)
+        temp_config = dict(provider_config)
+        temp_provider_id = (
+            f"{TOKEN_LIMIT_TEMP_PROVIDER_PREFIX}{group_id}_{provider_id}_{id(event)}"
+        )
+        temp_config["max_context_tokens"] = context_limit_tokens
+        temp_provider.provider_config = temp_config
+        try:
+            temp_provider.max_context_tokens = context_limit_tokens
+        except Exception:
+            pass
+
+        provider_manager = getattr(self.context, "provider_manager", None)
+        inst_map = getattr(provider_manager, "inst_map", None)
+        provider_insts = getattr(provider_manager, "provider_insts", None)
+        if not isinstance(inst_map, dict):
+            return
+        inst_map[temp_provider_id] = temp_provider
+        if isinstance(provider_insts, list):
+            provider_insts.append(temp_provider)
+
+        event.set_extra("selected_provider", temp_provider_id)
+        event.set_extra("token_limit_temp_context_provider_id", temp_provider_id)
+        event.set_extra("token_limit_context_provider_origin", provider_id)
+        event.set_extra("token_limit_context_tokens", context_limit_tokens)
+        event.set_extra(
+            "token_limit_context_provider_had_selected",
+            bool(previous_selected_provider_id),
+        )
+        asyncio.create_task(
+            self._cleanup_temp_context_provider_later(event, temp_provider_id)
+        )
+        logger.info(
+            "Apply temporary max_context_tokens for group=%s provider=%s context=%s",
+            group_id,
+            provider_id,
+            context_limit_tokens,
+        )
+
+    @staticmethod
+    def _context_limit_trim_budget(tokens: int) -> int:
+        return max(1, int(max(1, tokens) * TOKEN_LIMIT_CONTEXT_TRIM_RATIO))
+
+    @staticmethod
+    def _context_limit_compress_threshold(tokens: int) -> int:
+        return max(1, int(max(1, tokens) * TOKEN_LIMIT_CONTEXT_COMPRESS_THRESHOLD))
+
+    @staticmethod
+    def _context_limit_for_tokens(tokens: int) -> int:
+        return max(
+            1,
+            math.ceil(max(1, tokens) / TOKEN_LIMIT_CONTEXT_COMPRESS_THRESHOLD) + 128,
+        )
+
+    @staticmethod
+    def _estimate_text_tokens(value: Any) -> int:
+        text = str(value or "")
+        chinese_count = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+        other_count = len(text) - chinese_count
+        return int(chinese_count * 0.6 + other_count * 0.3)
+
+    def _estimate_content_tokens(self, content: Any) -> int:
+        if isinstance(content, str):
+            return self._estimate_text_tokens(content)
+        if isinstance(content, list):
+            total = 0
+            for item in content:
+                if isinstance(item, dict):
+                    item_type = str(item.get("type") or "")
+                    if item_type in {"image_url", "image"}:
+                        total += TOKEN_LIMIT_IMAGE_TOKEN_ESTIMATE
+                    elif item_type in {"audio_url", "input_audio", "audio"}:
+                        total += TOKEN_LIMIT_AUDIO_TOKEN_ESTIMATE
+                    elif "text" in item:
+                        total += self._estimate_text_tokens(item.get("text"))
+                    else:
+                        total += self._estimate_text_tokens(
+                            json.dumps(item, ensure_ascii=False)
+                        )
+                    continue
+                total += self._estimate_text_tokens(item)
+            return total
+        if isinstance(content, dict):
+            return self._estimate_text_tokens(json.dumps(content, ensure_ascii=False))
+        return self._estimate_text_tokens(content)
+
+    def _estimate_request_messages_tokens(
+        self,
+        req: ProviderRequest,
+        history_messages: list[Any],
+    ) -> int:
+        total = 0
+        if getattr(req, "system_prompt", None):
+            total += self._estimate_text_tokens(req.system_prompt)
+        for message in history_messages:
+            if isinstance(message, dict):
+                total += self._estimate_content_tokens(message.get("content", ""))
+                if message.get("tool_calls"):
+                    total += self._estimate_text_tokens(
+                        json.dumps(message.get("tool_calls"), ensure_ascii=False)
+                    )
+            else:
+                total += self._estimate_text_tokens(message)
+        if getattr(req, "prompt", None):
+            total += self._estimate_text_tokens(req.prompt)
+        for part in getattr(req, "extra_user_content_parts", None) or []:
+            if hasattr(part, "text"):
+                total += self._estimate_text_tokens(getattr(part, "text", ""))
+            elif isinstance(part, dict):
+                total += self._estimate_content_tokens(part)
+            else:
+                total += self._estimate_text_tokens(part)
+        total += (
+            len(getattr(req, "image_urls", None) or [])
+            * TOKEN_LIMIT_IMAGE_TOKEN_ESTIMATE
+        )
+        total += (
+            len(getattr(req, "audio_urls", None) or [])
+            * TOKEN_LIMIT_AUDIO_TOKEN_ESTIMATE
+        )
+        return total
+
+    @staticmethod
+    def _drop_oldest_context_turn(messages: list[Any]) -> tuple[list[Any], int]:
+        if not messages:
+            return messages, 0
+
+        first_user_index = 0
+        for index, message in enumerate(messages):
+            if isinstance(message, dict) and message.get("role") == "user":
+                first_user_index = index
+                break
+
+        next_user_index: int | None = None
+        for index in range(first_user_index + 1, len(messages)):
+            message = messages[index]
+            if isinstance(message, dict) and message.get("role") == "user":
+                next_user_index = index
+                break
+
+        drop_until = next_user_index if next_user_index is not None else len(messages)
+        return messages[drop_until:], drop_until
+
+    @staticmethod
+    def _count_context_turns(messages: list[Any]) -> int:
+        return sum(
+            1
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "user"
+        )
+
+    @staticmethod
+    def _keep_recent_context_turns(messages: list[Any], turns: int) -> list[Any]:
+        if turns <= 0 or not messages:
+            return []
+        user_indexes = [
+            index
+            for index, message in enumerate(messages)
+            if isinstance(message, dict) and message.get("role") == "user"
+        ]
+        if len(user_indexes) <= turns:
+            return list(messages)
+        return list(messages[user_indexes[-turns] :])
+
+    @staticmethod
+    def _clear_request_conversation_token_usage(req: ProviderRequest) -> None:
+        conversation = getattr(req, "conversation", None)
+        if conversation is not None and hasattr(conversation, "token_usage"):
+            try:
+                conversation.token_usage = 0
+            except Exception:
+                pass
+
+    def _trim_provider_request_context_if_needed(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        limit_context: dict[str, Any],
+    ) -> None:
+        group_id = str(limit_context.get("group_id") or "")
+        context_limit_tokens = self._group_context_limit_tokens(group_id)
+        if context_limit_tokens <= 0:
+            return
+        self._clear_request_conversation_token_usage(req)
+        raw_history_messages = getattr(req, "contexts", None)
+        history_messages = (
+            raw_history_messages if isinstance(raw_history_messages, list) else []
+        )
+        budget = self._context_limit_trim_budget(context_limit_tokens)
+        compress_threshold = self._context_limit_compress_threshold(
+            context_limit_tokens
+        )
+        before_tokens = self._estimate_request_messages_tokens(req, history_messages)
+        if before_tokens <= budget:
+            return
+
+        trimmed_messages = list(history_messages)
+        removed_turns = 0
+        while trimmed_messages:
+            next_messages, removed_count = self._drop_oldest_context_turn(
+                trimmed_messages
+            )
+            if removed_count <= 0 or len(next_messages) == len(trimmed_messages):
+                break
+            trimmed_messages = next_messages
+            removed_turns += 1
+            if self._estimate_request_messages_tokens(req, trimmed_messages) <= budget:
+                break
+
+        if len(trimmed_messages) == len(history_messages):
+            after_tokens = before_tokens
+        else:
+            after_tokens = self._estimate_request_messages_tokens(
+                req,
+                trimmed_messages,
+            )
+
+        effective_context_tokens = context_limit_tokens
+        raised_context = False
+        if after_tokens > compress_threshold:
+            fallback_messages = self._keep_recent_context_turns(
+                history_messages,
+                TOKEN_LIMIT_CONTEXT_FALLBACK_TURNS,
+            )
+            fallback_tokens = self._estimate_request_messages_tokens(
+                req,
+                fallback_messages,
+            )
+            trimmed_messages = fallback_messages
+            after_tokens = fallback_tokens
+            removed_turns = max(
+                0,
+                self._count_context_turns(history_messages)
+                - self._count_context_turns(trimmed_messages),
+            )
+            if after_tokens > compress_threshold:
+                effective_context_tokens = self._context_limit_for_tokens(after_tokens)
+                raised_context = self._set_temp_context_provider_limit(
+                    event,
+                    effective_context_tokens,
+                )
+
+        if len(trimmed_messages) != len(history_messages):
+            req.contexts = trimmed_messages
+        if len(trimmed_messages) != len(history_messages) or raised_context:
+            logger.info(
+                "Token limit context trim group=%s configured=%s effective=%s tokens=%s->%s budget=%s removed_turns=%s kept_turns=%s raised=%s",
+                group_id,
+                context_limit_tokens,
+                effective_context_tokens,
+                before_tokens,
+                after_tokens,
+                budget,
+                removed_turns,
+                self._count_context_turns(trimmed_messages),
+                raised_context,
+            )
 
     @staticmethod
     def _event_get_extra(event: AstrMessageEvent, key: str) -> Any:
@@ -1046,6 +1509,12 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
             limit = self._daily_limit_for_group(group_id, group_limits)
             has_custom_limit = group_id in group_limits
             only_at_bot_llm = self._group_only_at_bot_llm(group_id, group_settings)
+            context_limit_05 = self._group_context_limit_05(group_id, group_settings)
+            context_limit_tokens = self._group_context_limit_tokens(
+                group_id,
+                group_settings,
+                group_limits,
+            )
             primary_used, fallback_used, hourly = await self._query_split_usage_for_group(
                 group_id,
                 window,
@@ -1075,6 +1544,15 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
                     "custom_limit_tokens": group_limits.get(group_id),
                     "has_custom_limit": has_custom_limit,
                     "only_at_bot_llm": only_at_bot_llm,
+                    "context_limit_05": context_limit_05,
+                    "context_limit_tokens": context_limit_tokens,
+                    "context_limit_display": (
+                        _format_context_limit_tokens(context_limit_tokens)
+                        if context_limit_05
+                        else _format_context_limit_tokens(
+                            max(1, int(limit * TOKEN_LIMIT_CONTEXT_RATIO))
+                        )
+                    ),
                     "fallback_limit_tokens": fallback_token_limit,
                     "used_display": _format_tokens(used),
                     "limit_display": _format_tokens(effective_limit),
@@ -1344,6 +1822,12 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
         has_custom_limit = group_id in group_limits
         effective_limit = self._daily_limit_for_group(group_id, group_limits)
         only_at_bot_llm = self._group_only_at_bot_llm(group_id, group_settings)
+        context_limit_05 = self._group_context_limit_05(group_id, group_settings)
+        context_limit_tokens = self._group_context_limit_tokens(
+            group_id,
+            group_settings,
+            group_limits,
+        )
         return _ok(
             {
                 "group_id": group_id,
@@ -1359,6 +1843,13 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
                     _format_tokens(group_limits[group_id]) if has_custom_limit else ""
                 ),
                 "only_at_bot_llm": only_at_bot_llm,
+                "context_limit_05": context_limit_05,
+                "context_limit_tokens": context_limit_tokens,
+                "context_limit_display": _format_context_limit_tokens(
+                    context_limit_tokens
+                    if context_limit_05
+                    else max(1, int(effective_limit * TOKEN_LIMIT_CONTEXT_RATIO))
+                ),
             }
         )
 
@@ -1404,6 +1895,18 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
                         group_id,
                         group_settings,
                     ),
+                    "context_limit_05": self._group_context_limit_05(
+                        group_id,
+                        group_settings,
+                    ),
+                    "context_limit_tokens": self._group_context_limit_tokens(
+                        group_id,
+                        group_settings,
+                        group_limits,
+                    ),
+                    "context_limit_display": _format_context_limit_tokens(
+                        max(1, int(global_limit * TOKEN_LIMIT_CONTEXT_RATIO))
+                    ),
                 }
             )
 
@@ -1429,6 +1932,12 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
             )
             if not current_group_settings[GROUP_SETTING_ONLY_AT_BOT]:
                 current_group_settings.pop(GROUP_SETTING_ONLY_AT_BOT, None)
+        if "context_limit_05" in payload:
+            current_group_settings[GROUP_SETTING_CONTEXT_LIMIT_05] = bool(
+                payload.get("context_limit_05")
+            )
+            if not current_group_settings[GROUP_SETTING_CONTEXT_LIMIT_05]:
+                current_group_settings.pop(GROUP_SETTING_CONTEXT_LIMIT_05, None)
 
         if current_group_settings:
             group_settings[group_id] = current_group_settings
@@ -1447,6 +1956,12 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
         }
         has_custom_limit = group_id in group_limits
         effective_limit = self._daily_limit_for_group(group_id, group_limits)
+        context_limit_05 = self._group_context_limit_05(group_id, group_settings)
+        context_limit_tokens = self._group_context_limit_tokens(
+            group_id,
+            group_settings,
+            group_limits,
+        )
         return _ok(
             {
                 "group_id": group_id,
@@ -1467,6 +1982,13 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
                     group_id,
                     group_settings,
                 ),
+                "context_limit_05": context_limit_05,
+                "context_limit_tokens": context_limit_tokens,
+                "context_limit_display": _format_context_limit_tokens(
+                    context_limit_tokens
+                    if context_limit_05
+                    else max(1, int(effective_limit * TOKEN_LIMIT_CONTEXT_RATIO))
+                ),
             }
         )
 
@@ -1484,8 +2006,10 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
         await self._maybe_sync_user_stats()
         limit_context = await self._build_event_limit_context(event)
         if not limit_context:
+            self._cleanup_temp_context_provider(event)
             return
 
+        self._cleanup_temp_context_provider(event)
         if self._should_block_wake_word_invocation(event, limit_context):
             event.stop_event()
             logger.info(
@@ -1498,10 +2022,13 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
 
         limit_state = limit_context["limit_state"]
         if limit_state["status"] != "fallback":
+            if limit_state["status"] == "normal":
+                self._apply_context_limit_provider_if_needed(event, limit_context)
             return
 
         fallback_provider_id = str(limit_context["fallback_provider_id"] or "")
         if not limit_context["fallback_provider_valid"]:
+            self._apply_context_limit_provider_if_needed(event, limit_context)
             logger.warning(
                 "群 %s 当前窗口 token=%s 已进入回退区间，但回退模型供应商 %s 不可用；本次将交由 AstrBot 使用当前可用供应商。",
                 limit_context["group_id"],
@@ -1512,6 +2039,7 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
 
         event.set_extra("selected_provider", fallback_provider_id)
         event.set_extra("token_limit_selected_provider", fallback_provider_id)
+        self._apply_context_limit_provider_if_needed(event, limit_context)
         logger.info(
             "群 %s 当前窗口 token=%s 已达每日上限 %s，未达硬上限 %s，本次预先切换到回退模型供应商 %s。",
             limit_context["group_id"],
@@ -1538,14 +2066,18 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
             prompt=getattr(req, "prompt", None),
         )
         if self._block_group_only_at_bot_invocation_if_needed(event, "llm_request"):
+            self._cleanup_temp_context_provider(event)
             return
         if await self._block_user_daily_limit_if_needed(event, "llm_request"):
+            self._cleanup_temp_context_provider(event)
             return
         limit_context = await self._build_event_limit_context(event)
         if not limit_context:
+            self._cleanup_temp_context_provider(event)
             return
 
         if self._should_block_wake_word_invocation(event, limit_context):
+            self._cleanup_temp_context_provider(event)
             event.stop_event()
             logger.info(
                 "Blocked wake-word LLM request after token limit: group=%s used=%s limit=%s",
@@ -1561,6 +2093,10 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
         limit_state = limit_context["limit_state"]
         used = int(limit_state["used"])
         stop_limit = int(limit_state["hard_limit"])
+
+        if limit_state["status"] in {"normal", "fallback"}:
+            self._trim_provider_request_context_if_needed(event, req, limit_context)
+        self._cleanup_temp_context_provider(event)
 
         if limit_state["status"] == "normal":
             return
