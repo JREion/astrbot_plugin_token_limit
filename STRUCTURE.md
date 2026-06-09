@@ -1,6 +1,6 @@
 ﻿# STRUCTURE
 
-鏈枃妗ｈ褰?v0.6.2 鐗堟湰鐨勬彃浠剁粨鏋勩€佸唴閮?API銆侀〉闈㈠厓绱犳槧灏勫拰涓昏鍑芥暟鑱岃矗銆?
+鏈枃妗ｈ褰?v0.6.3 鐗堟湰鐨勬彃浠剁粨鏋勩€佸唴閮?API銆侀〉闈㈠厓绱犳槧灏勫拰涓昏鍑芥暟鑱岃矗銆?
 ## 鏂囦欢缁撴瀯
 
 ```text
@@ -37,7 +37,7 @@ astrbot_plugin_token_limit/
 
 ### metadata.yaml
 
-- `name`锛氭彃浠跺悕绉帮紝褰撳墠涓?`astrbot_plugin_token_limit`銆?- `version`锛氬綋鍓嶇増鏈?`0.6.2`銆?- `repo`锛氭彃浠朵粨搴撳湴鍧€銆?- `support_platforms`锛氶粯璁ゆ敮鎸?`aiocqhttp`銆乣qq_official`銆乣qq_official_webhook`銆?- `pages`锛氬０鏄?`dashboard` Plugin Page锛岄〉闈㈡枃浠朵负 `pages/dashboard/index.html`銆?
+- `name`锛氭彃浠跺悕绉帮紝褰撳墠涓?`astrbot_plugin_token_limit`銆?- `version`锛氬綋鍓嶇増鏈?`0.6.3`銆?- `repo`锛氭彃浠朵粨搴撳湴鍧€銆?- `support_platforms`锛氶粯璁ゆ敮鎸?`aiocqhttp`銆乣qq_official`銆乣qq_official_webhook`銆?- `pages`锛氬０鏄?`dashboard` Plugin Page锛岄〉闈㈡枃浠朵负 `pages/dashboard/index.html`銆?
 ### _conf_schema.json
 
 鍘熺敓 WebUI 閰嶇疆椤癸細
@@ -168,7 +168,7 @@ astrbot_plugin_token_limit/
 
 ## v0.6.2 补充结构说明
 
-- `metadata.yaml` 当前版本为 `0.6.2`。
+- `metadata.yaml` 在该版本更新为 `0.6.2`。
 - `group_limits.json` 在 v0.6.2 起保存“群聊个性化配置”结构，兼容旧格式：
   - 旧格式：`{"123456": 1000000}`，表示该群覆盖全局 `daily_token_limit`。
   - 新格式：`{"123456": {"daily_token_limit": 1000000, "only_at_bot_llm": true}}`。
@@ -205,3 +205,44 @@ astrbot_plugin_token_limit/
   - `openGroupSettings()` 从 `usage` 缓存和 `group-settings` API 读取 `only_at_bot_llm`。
   - `saveGroupSettings()` 同时保存 `daily_token_limit` 与 `only_at_bot_llm`；任一字段变化都会提交。
   - `resetGroupSettings()` 仍只提交 `reset=true`，仅重置本群每日上限为全局值。
+
+## v0.6.3 补充结构说明
+
+- `metadata.yaml` 当前版本为 `0.6.3`。
+- `user_usage_48h.json` 在 v0.6.3 起使用缩进 JSON 保存，便于管理员直接阅读。
+- `user_usage_48h.json` 的 `groups.{group_id}.users.{user_id}` 结构新增 `dialogs`：
+  - `stat_id`：AstrBot `ProviderStat.id`，用于去重。
+  - `created_at`：本次有效 LLM 请求计入 token 的 UTC 时间。
+  - `prompt`：本次请求中用户输入的前 20 个字，过滤常见 @ 标记，不包含 `ProviderRequest.system_prompt`。
+  - `tokens`：本次请求计入该用户的 token 用量。
+- `groups.{group_id}.requests[]` 请求归因快照新增 `prompt` 字段；`on_llm_request()` 从 `ProviderRequest.prompt` 补齐，供后续 ProviderStat 写入后回配到具体用户。
+- `backend/user_stats.py` 新增/扩展内部 API：
+  - `_sanitize_dialog_prompt(value)`：压缩空白、过滤常见 CQ/HTML at 标记，并截取前 20 个字。
+  - `_sanitize_user_dialog(raw_dialog, cutoff=None)`：清洗持久化对话明细并执行 48 小时裁剪。
+  - `_merge_user_dialogs(base, extra)`：合并用户维度的对话明细。
+  - `_store_user_dialogs(users, dialogs, replace_start, replace_end)`：按同步覆盖窗口替换旧明细，并按 `stat_id` 去重。
+  - `_user_dialog_key(dialog)`：生成对话去重键，优先使用 `ProviderStat.id`。
+  - `_user_dialog_from_record(record, tokens, request_item=None)`：把 ProviderStat 明细与请求快照转换为前端可用对话记录。
+  - `_find_prompt_for_usage_record(candidates, record)`：为可直接解析用户的 ProviderStat 记录补充请求 prompt。
+  - `_query_user_usage_details_for_group(group_id, window, group_data=None)`：返回当前刷新窗口内的用户 token 总量和对话明细；`api_get_user_usage()` 使用它渲染页面。
+  - `_stored_user_dialogs_for_group(stats, group_id, window)`：从持久化 JSON 取当前窗口内的对话明细作为兜底数据。
+  - `_combine_user_dialogs(realtime_dialogs, stored_dialogs)`：合并实时明细与持久化明细并去重。
+  - `_user_usage_dialog_rows(dialogs)`：将对话明细格式化为 API 字段：`prompt`、`tokens`、`display`、`time`、`created_at`。
+- `api_get_user_usage()` 的 `users[]` 每项新增 `dialogs[]`：
+  - `prompt`：表格“对话”列。
+  - `display` / `tokens`：表格“用量”列与排序数值。
+  - `time` / `created_at`：表格“时间”列与排序数值。
+- `pages/dashboard/index.html` 新增页面元素：
+  - `#userDialogOverlay`：点击今日用户柱状图后打开的“对话数据”悬浮窗口。
+  - `#closeUserDialogBtn`：右上角 `x` 关闭按钮，关闭后回到今日用户统计窗口。
+  - `#userDialogTarget`：显示当前用户昵称/QQ 号。
+  - `#userDialogTableBody`：渲染对话明细表格主体。
+  - `#sortUserDialogTokensBtn` / `#sortUserDialogTimeBtn`：按用量或时间切换正序/倒序排序。
+  - `#sortUserDialogTokensIcon` / `#sortUserDialogTimeIcon`：显示当前排序方向。
+- `pages/dashboard/index.html` 新增/扩展前端函数：
+  - `openUserDialog(user)`：打开对话表格并默认按时间倒序。
+  - `closeUserDialog()`：关闭对话表格并清理当前用户状态。
+  - `sortUserDialog(key)`：切换“用量”或“时间”排序方向。
+  - `sortedUserDialogs()`：根据当前排序状态返回对话明细副本。
+  - `renderUserDialog()`：渲染“对话 / 用量 / 时间”三列表格。
+  - `renderUserUsageChart()`：用户横向柱状图新增点击打开对话数据弹窗，并补充 hover/active 效果。

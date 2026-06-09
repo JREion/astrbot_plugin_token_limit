@@ -1,7 +1,27 @@
-# DEVELOP
+﻿# DEVELOP
 
 本文档记录每个版本对插件结构、配置、页面和运行逻辑的变动。
 
+## 0.6.3 - 2026-06-09
+
+扩展“今日用户 token 用量统计”，为用户排行补充有效 LLM 请求的对话明细。
+- `metadata.yaml`
+  - 版本号更新为 `0.6.3`。
+- `backend/user_stats.py`
+  - `user_usage_48h.json` 中每个用户新增 `dialogs` 列表，近 48 小时保留每条有效请求的 `stat_id`、`created_at`、`prompt` 和 `tokens`。
+  - `_save_user_stats()` 改为缩进格式写入 JSON，便于管理员直接打开查看。
+  - 新增 `_sanitize_dialog_prompt()`、`_sanitize_user_dialog()`、`_merge_user_dialogs()`、`_store_user_dialogs()`、`_stored_user_dialogs_for_group()`、`_combine_user_dialogs()` 与 `_user_usage_dialog_rows()`。
+  - `_remember_user_usage_event()` 新增 `prompt` 参数；`on_llm_request()` 会把 `ProviderRequest.prompt` 传入请求快照，只记录用户原始输入摘要，不记录系统提示词。
+  - `_query_hourly_user_usage_for_group()` 和 `_query_user_usage_details_for_group()` 在按用户统计 token 的同时生成对话明细；无法直接从 `umo` 解析用户的记录继续通过请求快照归因。
+  - `api_get_user_usage()` 返回每个用户的 `dialogs`，供 Plugin Page 点击柱状图查看。
+- `main.py`
+  - `on_llm_request()` 调用 `_remember_user_usage_event(..., prompt=req.prompt)`，补齐当前 LLM 请求的用户输入摘要。
+- `pages/dashboard/index.html`
+  - 新增 `#userDialogOverlay` “对话数据”悬浮窗口。
+  - 今日用户横向柱状图的柱子支持 hover/active 效果和点击打开对话表格。
+  - 对话表格展示“对话 / 用量 / 时间”，默认按时间倒序；点击“用量”或“时间”表头可切换正序/倒序。
+- `README.md` / `STRUCTURE.md`
+  - 补充 v0.6.3 对话明细持久化结构、API 返回字段、页面元素映射和交互说明。
 ## 0.6.2 - 2026-06-08
 
 新增单群“本群 token 节约策略”，允许管理员将某个群聊设置为仅通过 `@bot` 触发 LLM 回复。

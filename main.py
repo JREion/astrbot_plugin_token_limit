@@ -1532,7 +1532,11 @@ class Main(UserLimitMixin, UserStatsMixin, HistoryStatsMixin, Star):
             if getattr(req, "conversation", None) is not None
             else None
         )
-        self._remember_user_usage_event(event, conversation_id=conversation_id)
+        self._remember_user_usage_event(
+            event,
+            conversation_id=conversation_id,
+            prompt=getattr(req, "prompt", None),
+        )
         if self._block_group_only_at_bot_invocation_if_needed(event, "llm_request"):
             return
         if await self._block_user_daily_limit_if_needed(event, "llm_request"):

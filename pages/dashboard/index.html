@@ -894,13 +894,22 @@
         width: 0%;
         border-radius: 8px;
         background: var(--blue);
+        cursor: pointer;
         transition:
           width 320ms ease,
-          background 150ms ease;
+          background 150ms ease,
+          transform 80ms ease,
+          box-shadow 150ms ease;
       }
 
       .user-usage-bar:hover {
         background: #1f5fcf;
+        box-shadow: 0 0 0 3px rgba(45, 108, 223, 0.14);
+      }
+
+      .user-usage-bar:active {
+        background: #194fae;
+        transform: translateY(1px);
       }
 
       .user-usage-bar.over-limit {
@@ -920,6 +929,99 @@
 
       .user-usage-value.over-limit {
         color: var(--red);
+      }
+
+      .dialog-modal {
+        width: min(760px, 100%);
+        max-height: min(640px, calc(100vh - 48px));
+      }
+
+      .dialog-overlay {
+        z-index: 45;
+      }
+
+      .dialog-content {
+        display: grid;
+        gap: 12px;
+        padding-top: 14px;
+      }
+
+      .dialog-user {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .dialog-table-wrap {
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+
+      .dialog-table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+
+      .dialog-table th,
+      .dialog-table td {
+        border-bottom: 1px solid #edf1f6;
+        padding: 10px 12px;
+        text-align: left;
+        vertical-align: middle;
+        font-size: 13px;
+      }
+
+      .dialog-table th {
+        background: #f8fafc;
+        color: var(--text);
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      .dialog-table tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .dialog-text-cell {
+        width: 52%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .dialog-number-cell,
+      .dialog-time-cell {
+        width: 24%;
+        white-space: nowrap;
+      }
+
+      .dialog-sort-button {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        padding: 0;
+        cursor: pointer;
+        font-weight: 800;
+      }
+
+      .dialog-sort-button:hover {
+        color: var(--blue);
+      }
+
+      .dialog-sort-button:active {
+        color: #194fae;
+      }
+
+      .dialog-close-button {
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        font-size: 20px;
+        line-height: 1;
       }
 
       .history-tooltip {
@@ -1164,6 +1266,60 @@
       </section>
     </div>
 
+    <div
+      id="userDialogOverlay"
+      class="overlay dialog-overlay"
+      role="dialog"
+      aria-modal="true"
+    >
+      <section class="modal dialog-modal">
+        <div class="modal-topbar">
+          <div class="modal-title">对话数据</div>
+          <div class="modal-actions">
+            <button
+              id="closeUserDialogBtn"
+              class="action-button dialog-close-button"
+              type="button"
+              aria-label="关闭"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+        <div class="modal-content dialog-content">
+          <div id="userDialogTarget" class="dialog-user"></div>
+          <div class="dialog-table-wrap">
+            <table class="dialog-table">
+              <thead>
+                <tr>
+                  <th class="dialog-text-cell">对话</th>
+                  <th class="dialog-number-cell">
+                    <button
+                      id="sortUserDialogTokensBtn"
+                      class="dialog-sort-button"
+                      type="button"
+                    >
+                      用量<span id="sortUserDialogTokensIcon"></span>
+                    </button>
+                  </th>
+                  <th class="dialog-time-cell">
+                    <button
+                      id="sortUserDialogTimeBtn"
+                      class="dialog-sort-button"
+                      type="button"
+                    >
+                      时间<span id="sortUserDialogTimeIcon"></span>
+                    </button>
+                  </th>
+                </tr>
+              </thead>
+              <tbody id="userDialogTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
     <div id="remarkOverlay" class="overlay compact" role="dialog" aria-modal="true">
       <section class="modal">
         <div class="modal-topbar">
@@ -1271,6 +1427,9 @@
           users: [],
           window: null,
           syncedAt: "",
+          dialogUser: null,
+          dialogSortKey: "time",
+          dialogSortDirection: "desc",
         },
       };
 
@@ -1281,6 +1440,7 @@
       const strategyOverlay = document.getElementById("strategyOverlay");
       const historyOverlay = document.getElementById("historyOverlay");
       const userUsageOverlay = document.getElementById("userUsageOverlay");
+      const userDialogOverlay = document.getElementById("userDialogOverlay");
       const remarkOverlay = document.getElementById("remarkOverlay");
       const groupSettingsOverlay = document.getElementById("groupSettingsOverlay");
       const configForm = document.getElementById("configForm");
@@ -1308,6 +1468,12 @@
       const userUsageWindow = document.getElementById("userUsageWindow");
       const userUsageChart = document.getElementById("userUsageChart");
       const userUsageFooter = document.getElementById("userUsageFooter");
+      const userDialogTarget = document.getElementById("userDialogTarget");
+      const userDialogTableBody = document.getElementById("userDialogTableBody");
+      const sortUserDialogTokensBtn = document.getElementById("sortUserDialogTokensBtn");
+      const sortUserDialogTimeBtn = document.getElementById("sortUserDialogTimeBtn");
+      const sortUserDialogTokensIcon = document.getElementById("sortUserDialogTokensIcon");
+      const sortUserDialogTimeIcon = document.getElementById("sortUserDialogTimeIcon");
       const remarkInput = document.getElementById("remarkInput");
       const remarkTarget = document.getElementById("remarkTarget");
       const remarkToast = document.getElementById("remarkToast");
@@ -1910,6 +2076,7 @@
 
           const track = document.createElement("div");
           track.className = "user-usage-bar-track";
+          track.title = "点击查看对话数据";
 
           const bar = document.createElement("div");
           bar.className = "user-usage-bar";
@@ -1922,6 +2089,9 @@
           value.textContent = user.display || formatTokenNumber(user.tokens || 0);
 
           track.append(bar, value);
+          track.addEventListener("click", () => {
+            openUserDialog(user);
+          });
           row.append(label, track);
           userUsageChart.append(row);
 
@@ -1956,6 +2126,103 @@
         });
         sample.remove();
         return Math.ceil(maxWidth);
+      }
+
+      function openUserDialog(user) {
+        state.userUsage.dialogUser = user || null;
+        state.userUsage.dialogSortKey = "time";
+        state.userUsage.dialogSortDirection = "desc";
+        renderUserDialog();
+        userDialogOverlay.classList.add("open");
+      }
+
+      function closeUserDialog() {
+        userDialogOverlay.classList.remove("open");
+        state.userUsage.dialogUser = null;
+      }
+
+      function sortUserDialog(key) {
+        if (state.userUsage.dialogSortKey === key) {
+          state.userUsage.dialogSortDirection =
+            state.userUsage.dialogSortDirection === "asc" ? "desc" : "asc";
+        } else {
+          state.userUsage.dialogSortKey = key;
+          state.userUsage.dialogSortDirection = key === "time" ? "desc" : "desc";
+        }
+        renderUserDialog();
+      }
+
+      function sortedUserDialogs() {
+        const dialogs = [...(state.userUsage.dialogUser?.dialogs || [])];
+        const key = state.userUsage.dialogSortKey || "time";
+        const direction = state.userUsage.dialogSortDirection === "asc" ? 1 : -1;
+        dialogs.sort((left, right) => {
+          let leftValue;
+          let rightValue;
+          if (key === "tokens") {
+            leftValue = Number(left.tokens || 0);
+            rightValue = Number(right.tokens || 0);
+          } else {
+            leftValue = new Date(left.created_at || 0).getTime();
+            rightValue = new Date(right.created_at || 0).getTime();
+          }
+          if (leftValue === rightValue) return 0;
+          return leftValue > rightValue ? direction : -direction;
+        });
+        return dialogs;
+      }
+
+      function renderUserDialog() {
+        const user = state.userUsage.dialogUser;
+        const title = user ? `${user.label || user.user_id || ""}` : "";
+        userDialogTarget.textContent = title
+          ? `${title}${user.user_id ? `（${user.user_id}）` : ""}`
+          : "";
+        sortUserDialogTokensIcon.textContent =
+          state.userUsage.dialogSortKey === "tokens"
+            ? state.userUsage.dialogSortDirection === "asc"
+              ? "↑"
+              : "↓"
+            : "";
+        sortUserDialogTimeIcon.textContent =
+          state.userUsage.dialogSortKey === "time"
+            ? state.userUsage.dialogSortDirection === "asc"
+              ? "↑"
+              : "↓"
+            : "";
+
+        userDialogTableBody.innerHTML = "";
+        const dialogs = sortedUserDialogs();
+        if (!dialogs.length) {
+          const row = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.colSpan = 3;
+          cell.className = "history-empty";
+          cell.textContent = "当前统计窗口内暂无对话数据";
+          row.append(cell);
+          userDialogTableBody.append(row);
+          return;
+        }
+
+        dialogs.forEach((dialog) => {
+          const row = document.createElement("tr");
+
+          const promptCell = document.createElement("td");
+          promptCell.className = "dialog-text-cell";
+          promptCell.textContent = dialog.prompt || "（无文本）";
+          promptCell.title = promptCell.textContent;
+
+          const tokenCell = document.createElement("td");
+          tokenCell.className = "dialog-number-cell";
+          tokenCell.textContent = dialog.display || formatTokenNumber(dialog.tokens || 0);
+
+          const timeCell = document.createElement("td");
+          timeCell.className = "dialog-time-cell";
+          timeCell.textContent = dialog.time || "";
+
+          row.append(promptCell, tokenCell, timeCell);
+          userDialogTableBody.append(row);
+        });
       }
 
       function renderHistoryTotal() {
@@ -2270,6 +2537,7 @@
       }
 
       function closeUserUsage() {
+        closeUserDialog();
         userUsageOverlay.classList.remove("open");
         closeCustomSelects();
       }
@@ -2470,6 +2738,15 @@
       document
         .getElementById("cancelUserUsageBtn")
         .addEventListener("click", closeUserUsage);
+      document
+        .getElementById("closeUserDialogBtn")
+        .addEventListener("click", closeUserDialog);
+      sortUserDialogTokensBtn.addEventListener("click", () => {
+        sortUserDialog("tokens");
+      });
+      sortUserDialogTimeBtn.addEventListener("click", () => {
+        sortUserDialog("time");
+      });
       refreshUserUsageBtn.addEventListener("click", reloadUserUsage);
       document.getElementById("cancelRemarkBtn").addEventListener("click", closeRemark);
       document.getElementById("saveRemarkBtn").addEventListener("click", saveRemark);
@@ -2517,6 +2794,9 @@
       });
       userUsageOverlay.addEventListener("click", (event) => {
         if (event.target === userUsageOverlay) closeUserUsage();
+      });
+      userDialogOverlay.addEventListener("click", (event) => {
+        if (event.target === userDialogOverlay) closeUserDialog();
       });
       remarkOverlay.addEventListener("click", (event) => {
         if (event.target === remarkOverlay) closeRemark();

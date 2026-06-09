@@ -26,6 +26,7 @@ USER_USAGE_DEFAULT_TOP_LIMIT = 10
 USER_USAGE_REQUEST_RETENTION = timedelta(hours=48)
 USER_USAGE_REQUEST_LOOKBACK = timedelta(minutes=10)
 USER_USAGE_REQUEST_FUTURE_TOLERANCE = timedelta(seconds=5)
+USER_USAGE_DIALOG_PROMPT_LENGTH = 20
 USER_TOKEN_FIELDS_SUM = (
     ProviderStat.token_input_other
     + ProviderStat.token_input_cached
@@ -74,6 +75,44 @@ def _format_user_tokens(value: int) -> str:
     if normalized >= 1_000:
         return f"{normalized / 1_000:.2f} K"
     return str(normalized)
+
+
+def _sanitize_dialog_prompt(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"\[CQ:[^\]]+\]", "", text)
+    text = re.sub(r"<at\b[^>]*>.*?</at>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<at\b[^>]*/?>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:USER_USAGE_DIALOG_PROMPT_LENGTH]
+
+
+def _sanitize_user_dialog(
+    raw_dialog: Any,
+    cutoff: datetime | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(raw_dialog, dict):
+        return None
+    created_at = _parse_datetime(raw_dialog.get("created_at"))
+    if created_at is None:
+        return None
+    if cutoff is not None and created_at < cutoff:
+        return None
+    try:
+        tokens = max(0, int(raw_dialog.get("tokens") or 0))
+    except (TypeError, ValueError):
+        return None
+    if tokens <= 0:
+        return None
+    try:
+        stat_id = int(raw_dialog.get("stat_id") or 0)
+    except (TypeError, ValueError):
+        stat_id = 0
+    return {
+        "stat_id": stat_id,
+        "created_at": _iso_utc(created_at),
+        "prompt": _sanitize_dialog_prompt(raw_dialog.get("prompt")),
+        "tokens": tokens,
+    }
 
 
 def _local_timezone() -> tzinfo:
@@ -223,7 +262,7 @@ class UserStatsMixin:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
-                json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(data, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception as exc:
@@ -237,6 +276,7 @@ class UserStatsMixin:
             raw_groups = {}
 
         cutoff = _hour_start(_now_utc() - USER_USAGE_RETENTION)
+        request_cutoff = _now_utc() - USER_USAGE_REQUEST_RETENTION
         groups: dict[str, dict[str, Any]] = {}
         for raw_group_id, raw_group in raw_groups.items():
             group_id = _normalize_user_group_id(raw_group_id)
@@ -269,18 +309,27 @@ class UserStatsMixin:
                         if tokens > 0:
                             hours[_iso_utc(normalized_bucket)] = tokens
 
+                dialogs: list[dict[str, Any]] = []
+                raw_dialogs = raw_user.get("dialogs")
+                if isinstance(raw_dialogs, list):
+                    for raw_dialog in raw_dialogs:
+                        dialog = _sanitize_user_dialog(raw_dialog, request_cutoff)
+                        if dialog is not None:
+                            dialogs.append(dialog)
+                dialogs.sort(key=lambda item: item["created_at"])
+
                 nickname = _sanitize_user_name(raw_user.get("nickname"))
-                if hours or nickname:
+                if hours or dialogs or nickname:
                     users[user_id] = {
                         "nickname": nickname,
                         "total_tokens": sum(hours.values()),
                         "hours": hours,
+                        "dialogs": dialogs,
                     }
 
             raw_requests = raw_group.get("requests")
             requests: list[dict[str, Any]] = []
             if isinstance(raw_requests, list):
-                request_cutoff = _now_utc() - USER_USAGE_REQUEST_RETENTION
                 for raw_request in raw_requests:
                     if not isinstance(raw_request, dict):
                         continue
@@ -304,6 +353,9 @@ class UserStatsMixin:
                             "conversation_id": str(
                                 raw_request.get("conversation_id") or ""
                             ).strip()[:128],
+                            "prompt": _sanitize_dialog_prompt(
+                                raw_request.get("prompt")
+                            ),
                             "assigned_stat_ids": [
                                 int(stat_id)
                                 for stat_id in raw_request.get(
@@ -489,17 +541,19 @@ class UserStatsMixin:
             self._prune_user_group_data(group_data, retention_start, query_end, query_end)
             return False
 
-        hourly, unassigned_records = await self._query_hourly_user_usage_for_group(
+        hourly, direct_dialogs, unassigned_records = await self._query_hourly_user_usage_for_group(
             group_id,
             query_start,
             query_end,
+            group_data,
         )
-        assigned_hourly, request_changed = self._assign_user_usage_records(
+        assigned_hourly, assigned_dialogs, request_changed = self._assign_user_usage_records(
             group_data,
             unassigned_records,
             now,
         )
         hourly = self._merge_user_hours(hourly, assigned_hourly)
+        dialogs = self._merge_user_dialogs(direct_dialogs, assigned_dialogs)
         changed = self._prune_user_group_data(
             group_data,
             retention_start,
@@ -519,7 +573,7 @@ class UserStatsMixin:
                 continue
             user_data = users.setdefault(user_id, {"nickname": "", "hours": {}})
             if not isinstance(user_data, dict):
-                user_data = {"nickname": "", "hours": {}}
+                user_data = {"nickname": "", "hours": {}, "dialogs": []}
                 users[user_id] = user_data
             hours = user_data.setdefault("hours", {})
             if not isinstance(hours, dict):
@@ -530,6 +584,8 @@ class UserStatsMixin:
                 if normalized_tokens > 0:
                     hours[bucket_key] = normalized_tokens
                     changed = True
+
+        changed = self._store_user_dialogs(users, dialogs, query_start, query_end) or changed
 
         for user_id in list(users.keys()):
             user_data = users[user_id]
@@ -542,7 +598,11 @@ class UserStatsMixin:
                 hours = {}
                 user_data["hours"] = hours
             user_data["total_tokens"] = sum(max(0, int(value or 0)) for value in hours.values())
-            if not hours and not _sanitize_user_name(user_data.get("nickname")):
+            dialogs = user_data.get("dialogs")
+            if not isinstance(dialogs, list):
+                dialogs = []
+                user_data["dialogs"] = dialogs
+            if not hours and not dialogs and not _sanitize_user_name(user_data.get("nickname")):
                 users.pop(user_id, None)
                 changed = True
 
@@ -567,16 +627,139 @@ class UserStatsMixin:
                 target[bucket_key] = target.get(bucket_key, 0) + max(0, int(tokens or 0))
         return base
 
+    @staticmethod
+    def _merge_user_dialogs(
+        base: dict[str, list[dict[str, Any]]],
+        extra: dict[str, list[dict[str, Any]]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        if not extra:
+            return base
+        for user_id, user_dialogs in extra.items():
+            if not user_id or not user_dialogs:
+                continue
+            base.setdefault(user_id, []).extend(user_dialogs)
+        return base
+
+    def _store_user_dialogs(
+        self,
+        users: dict[str, Any],
+        dialogs: dict[str, list[dict[str, Any]]],
+        replace_start: datetime,
+        replace_end: datetime,
+    ) -> bool:
+        if not dialogs:
+            return False
+        changed = False
+        for user_id, user_dialogs in dialogs.items():
+            sanitized_user_id = _sanitize_user_id(user_id)
+            if not sanitized_user_id or not user_dialogs:
+                continue
+            user_data = users.setdefault(
+                sanitized_user_id,
+                {"nickname": "", "hours": {}, "dialogs": []},
+            )
+            if not isinstance(user_data, dict):
+                user_data = {"nickname": "", "hours": {}, "dialogs": []}
+                users[sanitized_user_id] = user_data
+                changed = True
+
+            existing_dialogs = user_data.get("dialogs")
+            if not isinstance(existing_dialogs, list):
+                existing_dialogs = []
+                changed = True
+
+            kept: list[dict[str, Any]] = []
+            for dialog in existing_dialogs:
+                sanitized_dialog = _sanitize_user_dialog(dialog)
+                if sanitized_dialog is None:
+                    changed = True
+                    continue
+                created_at = _parse_datetime(sanitized_dialog.get("created_at"))
+                if created_at is None or replace_start <= created_at < replace_end:
+                    changed = True
+                    continue
+                kept.append(sanitized_dialog)
+
+            by_key: dict[str, dict[str, Any]] = {}
+            for dialog in kept:
+                key = self._user_dialog_key(dialog)
+                if key:
+                    by_key[key] = dialog
+            for dialog in user_dialogs:
+                sanitized_dialog = _sanitize_user_dialog(dialog)
+                if sanitized_dialog is None:
+                    continue
+                key = self._user_dialog_key(sanitized_dialog)
+                if not key:
+                    continue
+                by_key[key] = sanitized_dialog
+                changed = True
+
+            next_dialogs = sorted(
+                by_key.values(),
+                key=lambda item: item.get("created_at", ""),
+            )
+            user_data["dialogs"] = next_dialogs
+        return changed
+
+    @staticmethod
+    def _user_dialog_key(dialog: dict[str, Any]) -> str:
+        stat_id = int(dialog.get("stat_id") or 0)
+        if stat_id > 0:
+            return f"stat:{stat_id}"
+        return f"time:{dialog.get('created_at', '')}:{dialog.get('tokens', 0)}"
+
+    @staticmethod
+    def _user_dialog_from_record(
+        record: dict[str, Any],
+        tokens: int,
+        request_item: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        created_at = _to_utc_datetime(record.get("created_at")) or _now_utc()
+        return {
+            "stat_id": int(record.get("id") or 0),
+            "created_at": _iso_utc(created_at),
+            "prompt": _sanitize_dialog_prompt(
+                (request_item or {}).get("prompt") or record.get("prompt")
+            ),
+            "tokens": max(0, int(tokens or 0)),
+        }
+
+    def _find_prompt_for_usage_record(
+        self,
+        candidates: list[dict[str, Any]],
+        record: dict[str, Any],
+    ) -> str:
+        if not candidates:
+            return ""
+        stat_id = int(record.get("id") or 0)
+        created_at = _to_utc_datetime(record.get("created_at"))
+        started_at = _to_utc_datetime(record.get("started_at")) or created_at
+        record_umo = str(record.get("umo") or "").strip()
+        conversation_id = str(record.get("conversation_id") or "").strip()
+        if not stat_id or started_at is None or not record_umo:
+            return ""
+        matched = self._match_user_usage_request(
+            candidates,
+            stat_id,
+            record_umo,
+            started_at,
+            conversation_id,
+        )
+        if not matched:
+            return ""
+        return _sanitize_dialog_prompt(matched.get("prompt"))
+
     def _assign_user_usage_records(
         self,
         group_data: dict[str, Any],
         records: list[dict[str, Any]],
         now: datetime,
-    ) -> tuple[dict[str, dict[str, int]], bool]:
+    ) -> tuple[dict[str, dict[str, int]], dict[str, list[dict[str, Any]]], bool]:
         requests = group_data.setdefault("requests", [])
         if not isinstance(requests, list):
             group_data["requests"] = []
-            return {}, True
+            return {}, {}, True
 
         candidates: list[dict[str, Any]] = []
         changed = False
@@ -601,6 +784,7 @@ class UserStatsMixin:
             request_item["conversation_id"] = str(
                 request_item.get("conversation_id") or ""
             ).strip()[:128]
+            request_item["prompt"] = _sanitize_dialog_prompt(request_item.get("prompt"))
             assigned_stat_ids = {
                 int(stat_id)
                 for stat_id in request_item.get("assigned_stat_ids", [])
@@ -612,6 +796,7 @@ class UserStatsMixin:
             candidates.append(request_item)
 
         assigned_hourly: dict[str, dict[str, int]] = {}
+        assigned_dialogs: dict[str, list[dict[str, Any]]] = {}
         for record in records:
             stat_id = int(record.get("id") or 0)
             tokens = max(0, int(record.get("tokens") or 0))
@@ -645,6 +830,9 @@ class UserStatsMixin:
             assigned_hourly.setdefault(user_id, {})[bucket_key] = (
                 assigned_hourly.setdefault(user_id, {}).get(bucket_key, 0) + tokens
             )
+            assigned_dialogs.setdefault(user_id, []).append(
+                self._user_dialog_from_record(record, tokens, matched)
+            )
             assigned_set = matched.setdefault("_assigned_set", set())
             assigned_set.add(stat_id)
             matched["assigned_stat_ids"] = sorted(assigned_set)[-64:]
@@ -656,7 +844,7 @@ class UserStatsMixin:
         if len(candidates) != len(requests):
             changed = True
         group_data["requests"] = candidates
-        return assigned_hourly, changed
+        return assigned_hourly, assigned_dialogs, changed
 
     def _user_usage_request_candidates(
         self,
@@ -689,6 +877,7 @@ class UserStatsMixin:
                     "conversation_id": str(
                         request_item.get("conversation_id") or ""
                     ).strip()[:128],
+                    "prompt": _sanitize_dialog_prompt(request_item.get("prompt")),
                 }
             )
         return candidates
@@ -705,12 +894,13 @@ class UserStatsMixin:
         group_data: dict[str, Any] | None,
         records: list[dict[str, Any]],
         now: datetime,
-    ) -> dict[str, int]:
+    ) -> tuple[dict[str, int], dict[str, list[dict[str, Any]]]]:
         candidates = self._user_usage_request_candidates(group_data, now)
         if not candidates:
-            return {}
+            return {}, {}
 
         totals: dict[str, int] = {}
+        dialogs: dict[str, list[dict[str, Any]]] = {}
         for record in records:
             stat_id = int(record.get("id") or 0)
             tokens = max(0, int(record.get("tokens") or 0))
@@ -740,7 +930,10 @@ class UserStatsMixin:
             if not user_id:
                 continue
             totals[user_id] = totals.get(user_id, 0) + tokens
-        return totals
+            dialogs.setdefault(user_id, []).append(
+                self._user_dialog_from_record(record, tokens, matched)
+            )
+        return totals, dialogs
 
     @staticmethod
     def _match_user_usage_request(
@@ -834,7 +1027,26 @@ class UserStatsMixin:
                 ):
                     hours.pop(bucket_key, None)
                     changed = True
-            if not hours and not _sanitize_user_name(user_data.get("nickname")):
+            dialogs = user_data.get("dialogs")
+            if not isinstance(dialogs, list):
+                dialogs = []
+                user_data["dialogs"] = dialogs
+                changed = True
+            next_dialogs: list[dict[str, Any]] = []
+            for dialog in dialogs:
+                sanitized_dialog = _sanitize_user_dialog(dialog, retention_start)
+                if sanitized_dialog is None:
+                    changed = True
+                    continue
+                created_at = _parse_datetime(sanitized_dialog.get("created_at"))
+                if created_at is None or replace_start <= created_at < replace_end:
+                    changed = True
+                    continue
+                next_dialogs.append(sanitized_dialog)
+            if len(next_dialogs) != len(dialogs):
+                changed = True
+            user_data["dialogs"] = next_dialogs
+            if not hours and not next_dialogs and not _sanitize_user_name(user_data.get("nickname")):
                 users.pop(user_id, None)
                 changed = True
                 continue
@@ -855,7 +1067,12 @@ class UserStatsMixin:
         group_id: str,
         start_utc: datetime,
         end_utc: datetime,
-    ) -> tuple[dict[str, dict[str, int]], list[dict[str, Any]]]:
+        group_data: dict[str, Any] | None = None,
+    ) -> tuple[
+        dict[str, dict[str, int]],
+        dict[str, list[dict[str, Any]]],
+        list[dict[str, Any]],
+    ]:
         db = self.context.get_db()
         filters = [
             ProviderStat.agent_type == "internal",
@@ -864,7 +1081,9 @@ class UserStatsMixin:
             self._user_usage_umo_filter(group_id),
         ]
         user_hours: dict[str, dict[str, int]] = {}
+        user_dialogs: dict[str, list[dict[str, Any]]] = {}
         unassigned_records: list[dict[str, Any]] = []
+        request_candidates = self._user_usage_request_candidates(group_data, _now_utc())
         async with db.get_db() as session:
             rows_result = await session.execute(
                 select(
@@ -899,6 +1118,24 @@ class UserStatsMixin:
                         user_hours.setdefault(user_id, {}).get(key, 0)
                         + normalized_tokens
                     )
+                    record = {
+                        "id": int(stat_id or 0),
+                        "created_at": created_at_utc,
+                        "started_at": _timestamp_to_utc(start_time),
+                        "umo": str(umo or ""),
+                        "conversation_id": str(conversation_id or ""),
+                        "tokens": normalized_tokens,
+                    }
+                    prompt = self._find_prompt_for_usage_record(
+                        request_candidates,
+                        record,
+                    )
+                    user_dialogs.setdefault(user_id, []).append(
+                        self._user_dialog_from_record(
+                            {**record, "prompt": prompt},
+                            normalized_tokens,
+                        )
+                    )
                     continue
                 unassigned_records.append(
                     {
@@ -910,7 +1147,7 @@ class UserStatsMixin:
                         "tokens": normalized_tokens,
                     }
                 )
-        return user_hours, unassigned_records
+        return user_hours, user_dialogs, unassigned_records
 
     async def _query_user_totals_for_group(
         self,
@@ -930,7 +1167,7 @@ class UserStatsMixin:
             self._user_usage_umo_filter(group_id),
         ]
         totals: dict[str, int] = {}
-        unassigned_umos: set[str] = set()
+        unassigned_records: list[dict[str, Any]] = []
         async with db.get_db() as session:
             grouped_result = await session.execute(
                 select(
@@ -940,6 +1177,7 @@ class UserStatsMixin:
                 .where(*filters)
                 .group_by(ProviderStat.umo)
             )
+            unassigned_umos: set[str] = set()
             for umo, tokens in grouped_result.all():
                 normalized_tokens = max(0, int(tokens or 0))
                 if normalized_tokens <= 0:
@@ -952,7 +1190,6 @@ class UserStatsMixin:
                 if record_umo:
                     unassigned_umos.add(record_umo)
 
-            unassigned_records: list[dict[str, Any]] = []
             if unassigned_umos:
                 rows_result = await session.execute(
                     select(
@@ -996,7 +1233,7 @@ class UserStatsMixin:
                 if isinstance(group_data, dict)
                 else self._cached_user_group_data(group_id)
             )
-            assigned_totals = self._assign_user_usage_records_to_totals(
+            assigned_totals, _ = self._assign_user_usage_records_to_totals(
                 source_group_data,
                 unassigned_records,
                 now,
@@ -1004,6 +1241,124 @@ class UserStatsMixin:
             for user_id, tokens in assigned_totals.items():
                 totals[user_id] = totals.get(user_id, 0) + tokens
         return totals
+
+    async def _query_user_usage_details_for_group(
+        self,
+        group_id: str,
+        window: UserUsageWindow,
+        group_data: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, int], dict[str, list[dict[str, Any]]]]:
+        db = self.context.get_db()
+        now = _now_utc()
+        query_end = min(window.end_utc, now)
+        if query_end <= window.start_utc:
+            return {}, {}
+        filters = [
+            ProviderStat.agent_type == "internal",
+            ProviderStat.created_at >= window.start_utc,
+            ProviderStat.created_at < query_end,
+            self._user_usage_umo_filter(group_id),
+        ]
+        totals: dict[str, int] = {}
+        dialogs: dict[str, list[dict[str, Any]]] = {}
+        unassigned_umos: set[str] = set()
+        request_candidates = self._user_usage_request_candidates(group_data, now)
+        async with db.get_db() as session:
+            grouped_result = await session.execute(
+                select(
+                    ProviderStat.umo,
+                    func.coalesce(func.sum(USER_TOKEN_FIELDS_SUM), 0).label("tokens"),
+                )
+                .where(*filters)
+                .group_by(ProviderStat.umo)
+            )
+            grouped_rows = grouped_result.all()
+            for umo, tokens in grouped_rows:
+                normalized_tokens = max(0, int(tokens or 0))
+                if normalized_tokens <= 0:
+                    continue
+                user_id = _extract_user_id_from_umo(umo, group_id)
+                if user_id:
+                    totals[user_id] = totals.get(user_id, 0) + normalized_tokens
+                    continue
+                record_umo = str(umo or "").strip()
+                if record_umo:
+                    unassigned_umos.add(record_umo)
+
+            unassigned_records: list[dict[str, Any]] = []
+            detail_umos = {
+                str(umo or "").strip()
+                for umo, _tokens in grouped_rows
+                if str(umo or "").strip()
+            }
+            if detail_umos:
+                rows_result = await session.execute(
+                    select(
+                        ProviderStat.id,
+                        ProviderStat.created_at,
+                        ProviderStat.umo,
+                        ProviderStat.conversation_id,
+                        ProviderStat.start_time,
+                        USER_TOKEN_FIELDS_SUM.label("tokens"),
+                    )
+                    .where(*filters, ProviderStat.umo.in_(sorted(detail_umos)))
+                    .order_by(col(ProviderStat.created_at).asc())
+                )
+                for (
+                    stat_id,
+                    created_at,
+                    umo,
+                    conversation_id,
+                    start_time,
+                    tokens,
+                ) in rows_result.all():
+                    normalized_tokens = max(0, int(tokens or 0))
+                    if normalized_tokens <= 0:
+                        continue
+                    created_at_utc = _to_utc_datetime(created_at)
+                    if created_at_utc is None:
+                        continue
+                    user_id = _extract_user_id_from_umo(umo, group_id)
+                    record = {
+                        "id": int(stat_id or 0),
+                        "created_at": created_at_utc,
+                        "started_at": _timestamp_to_utc(start_time),
+                        "umo": str(umo or ""),
+                        "conversation_id": str(conversation_id or ""),
+                        "tokens": normalized_tokens,
+                    }
+                    if user_id:
+                        prompt = self._find_prompt_for_usage_record(
+                            request_candidates,
+                            record,
+                        )
+                        dialogs.setdefault(user_id, []).append(
+                            self._user_dialog_from_record(
+                                {**record, "prompt": prompt},
+                                normalized_tokens,
+                            )
+                        )
+                        continue
+                    if str(umo or "").strip() not in unassigned_umos:
+                        continue
+                    unassigned_records.append(
+                        record
+                    )
+        if unassigned_records:
+            source_group_data = (
+                group_data
+                if isinstance(group_data, dict)
+                else self._cached_user_group_data(group_id)
+            )
+            assigned_totals, assigned_dialogs = self._assign_user_usage_records_to_totals(
+                source_group_data,
+                unassigned_records,
+                now,
+            )
+            for user_id, tokens in assigned_totals.items():
+                totals[user_id] = totals.get(user_id, 0) + tokens
+            dialogs = self._merge_user_dialogs(dialogs, assigned_dialogs)
+        return totals, dialogs
 
     def _stored_user_totals_for_group(
         self,
@@ -1038,6 +1393,42 @@ class UserStatsMixin:
                 totals[sanitized_user_id] = total
         return totals
 
+    def _stored_user_dialogs_for_group(
+        self,
+        stats: dict[str, Any],
+        group_id: str,
+        window: UserUsageWindow,
+    ) -> dict[str, list[dict[str, Any]]]:
+        users = (
+            stats.get("groups", {})
+            .get(group_id, {})
+            .get("users", {})
+        )
+        if not isinstance(users, dict):
+            return {}
+
+        dialogs_by_user: dict[str, list[dict[str, Any]]] = {}
+        for user_id, user_data in users.items():
+            sanitized_user_id = _sanitize_user_id(user_id)
+            if not sanitized_user_id or not isinstance(user_data, dict):
+                continue
+            raw_dialogs = user_data.get("dialogs")
+            if not isinstance(raw_dialogs, list):
+                continue
+            dialogs: list[dict[str, Any]] = []
+            for raw_dialog in raw_dialogs:
+                dialog = _sanitize_user_dialog(raw_dialog)
+                if dialog is None:
+                    continue
+                created_at = _parse_datetime(dialog.get("created_at"))
+                if created_at is None:
+                    continue
+                if window.start_utc <= created_at < window.end_utc:
+                    dialogs.append(dialog)
+            if dialogs:
+                dialogs_by_user[sanitized_user_id] = dialogs
+        return dialogs_by_user
+
     @staticmethod
     def _combine_user_totals(
         realtime_totals: dict[str, int],
@@ -1058,10 +1449,36 @@ class UserStatsMixin:
             )
         return totals
 
+    def _combine_user_dialogs(
+        self,
+        realtime_dialogs: dict[str, list[dict[str, Any]]],
+        stored_dialogs: dict[str, list[dict[str, Any]]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        combined: dict[str, dict[str, dict[str, Any]]] = {}
+        for source in (stored_dialogs, realtime_dialogs):
+            for user_id, dialogs in source.items():
+                sanitized_user_id = _sanitize_user_id(user_id)
+                if not sanitized_user_id or not isinstance(dialogs, list):
+                    continue
+                target = combined.setdefault(sanitized_user_id, {})
+                for raw_dialog in dialogs:
+                    dialog = _sanitize_user_dialog(raw_dialog)
+                    if dialog is None:
+                        continue
+                    key = self._user_dialog_key(dialog)
+                    if key:
+                        target[key] = dialog
+        return {
+            user_id: sorted(dialogs.values(), key=lambda item: item["created_at"])
+            for user_id, dialogs in combined.items()
+            if dialogs
+        }
+
     def _remember_user_usage_event(
         self,
         event: Any,
         conversation_id: str | None = None,
+        prompt: Any = None,
     ) -> None:
         try:
             if not self._is_qq_group_event(event):
@@ -1097,6 +1514,7 @@ class UserStatsMixin:
                 requests = []
                 group_data["requests"] = requests
                 changed = True
+            prompt_text = _sanitize_dialog_prompt(prompt)
             started_at = datetime.fromtimestamp(
                 float(getattr(event, "created_at", 0) or 0),
                 timezone.utc,
@@ -1107,6 +1525,7 @@ class UserStatsMixin:
                 "user_id": user_id,
                 "nickname": nickname,
                 "conversation_id": str(conversation_id or "").strip()[:128],
+                "prompt": prompt_text,
                 "assigned_stat_ids": [],
             }
             for existing_request in requests:
@@ -1123,6 +1542,8 @@ class UserStatsMixin:
                         existing_request["conversation_id"] = request_item[
                             "conversation_id"
                         ]
+                    if prompt_text:
+                        existing_request["prompt"] = prompt_text
                     break
             else:
                 requests.append(request_item)
@@ -1215,7 +1636,7 @@ class UserStatsMixin:
                 group_data = stats.get("groups", {}).get(selected_group_id, {})
                 if not isinstance(group_data, dict):
                     group_data = {}
-                realtime_totals = await self._query_user_totals_for_group(
+                realtime_totals, realtime_dialogs = await self._query_user_usage_details_for_group(
                     selected_group_id,
                     window,
                     group_data,
@@ -1226,10 +1647,19 @@ class UserStatsMixin:
                     window,
                 )
                 totals = self._combine_user_totals(realtime_totals, stored_totals)
+                dialogs = self._combine_user_dialogs(
+                    realtime_dialogs,
+                    self._stored_user_dialogs_for_group(
+                        stats,
+                        selected_group_id,
+                        window,
+                    ),
+                )
                 users = self._user_usage_rows(
                     stats,
                     selected_group_id,
                     totals,
+                    dialogs,
                     top_limit,
                 )
             user_daily_limit = int(self._user_daily_limit())
@@ -1289,6 +1719,7 @@ class UserStatsMixin:
         stats: dict[str, Any],
         group_id: str,
         totals: dict[str, int],
+        dialogs: dict[str, list[dict[str, Any]]],
         top_limit: int,
     ) -> list[dict[str, Any]]:
         users = (
@@ -1314,6 +1745,9 @@ class UserStatsMixin:
                     "label": nickname or user_id,
                     "tokens": normalized_tokens,
                     "display": _format_user_tokens(normalized_tokens),
+                    "dialogs": self._user_usage_dialog_rows(
+                        dialogs.get(user_id, []),
+                    ),
                     "over_user_limit": limit_enabled
                     and normalized_tokens >= user_daily_limit,
                     "user_limit": user_daily_limit,
@@ -1326,3 +1760,31 @@ class UserStatsMixin:
             )
         rows.sort(key=lambda item: item["tokens"], reverse=True)
         return rows[:top_limit]
+
+    def _user_usage_dialog_rows(
+        self,
+        dialogs: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        local_tz = _local_timezone()
+        rows: list[dict[str, Any]] = []
+        for raw_dialog in dialogs:
+            dialog = _sanitize_user_dialog(raw_dialog)
+            if dialog is None:
+                continue
+            created_at = _parse_datetime(dialog.get("created_at"))
+            if created_at is None:
+                continue
+            local_created_at = created_at.astimezone(local_tz)
+            tokens = max(0, int(dialog.get("tokens") or 0))
+            rows.append(
+                {
+                    "stat_id": int(dialog.get("stat_id") or 0),
+                    "prompt": _sanitize_dialog_prompt(dialog.get("prompt")) or "（无文本）",
+                    "tokens": tokens,
+                    "display": _format_user_tokens(tokens),
+                    "time": local_created_at.strftime("%H:%M:%S"),
+                    "created_at": created_at.isoformat(),
+                }
+            )
+        rows.sort(key=lambda item: item["created_at"], reverse=True)
+        return rows
