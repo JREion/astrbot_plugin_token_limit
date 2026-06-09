@@ -990,6 +990,38 @@
         white-space: nowrap;
       }
 
+      .dialog-prompt-wrap {
+        min-width: 0;
+        max-width: 100%;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        vertical-align: middle;
+      }
+
+      .dialog-quote-tag {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        height: 20px;
+        border: 1px solid #cbd5e1;
+        border-radius: 7px;
+        background: #f1f5f9;
+        color: #475569;
+        padding: 0 6px;
+        font-size: 12px;
+        font-weight: 800;
+        line-height: 1;
+        white-space: nowrap;
+      }
+
+      .dialog-prompt-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .dialog-number-cell,
       .dialog-time-cell {
         width: 24%;
@@ -2209,8 +2241,22 @@
 
           const promptCell = document.createElement("td");
           promptCell.className = "dialog-text-cell";
-          promptCell.textContent = dialog.prompt || "（无文本）";
-          promptCell.title = promptCell.textContent;
+          const promptText = dialog.prompt || "（无文本）";
+          const promptWrap = document.createElement("span");
+          promptWrap.className = "dialog-prompt-wrap";
+          promptCell.textContent = "";
+          if (dialog.has_quote) {
+            const quoteTag = document.createElement("span");
+            quoteTag.className = "dialog-quote-tag";
+            quoteTag.textContent = "含引用";
+            promptWrap.append(quoteTag);
+          }
+          const promptSpan = document.createElement("span");
+          promptSpan.className = "dialog-prompt-text";
+          promptSpan.textContent = promptText;
+          promptWrap.append(promptSpan);
+          promptCell.title = `${dialog.has_quote ? "含引用 " : ""}${promptText}`;
+          promptCell.append(promptWrap);
 
           const tokenCell = document.createElement("td");
           tokenCell.className = "dialog-number-cell";

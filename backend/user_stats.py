@@ -77,13 +77,151 @@ def _format_user_tokens(value: int) -> str:
     return str(normalized)
 
 
-def _sanitize_dialog_prompt(value: Any) -> str:
+def _strip_dialog_quote_content(value: Any) -> tuple[str, bool]:
     text = str(value or "")
+    has_quote = False
+
+    for pattern in (
+        r"\[CQ:(?:reply|quote)[^\]]*\]",
+        r"<(?:reply|quote)\b[^>]*>[\s\S]*?</(?:reply|quote)>",
+        r"<(?:reply|quote)\b[^>]*/?>",
+    ):
+        text, count = re.subn(pattern, "", text, flags=re.IGNORECASE)
+        has_quote = has_quote or count > 0
+
+    quote_line_re = re.compile(
+        r"^\s*(?:[「『]?\s*[↪↩]\s*)?(?:引用消息|回复消息|引用的消息|Quoted message|Reply message).*$",
+        re.IGNORECASE,
+    )
+    marker_line_re = re.compile(r"^\s*[「『]?\s*[↪↩].*$")
+    close_marks = ("」", "』")
+    lines = text.splitlines()
+    kept_lines: list[str] = []
+    in_quote_block = False
+    for index, line in enumerate(lines):
+        if in_quote_block:
+            has_quote = True
+            close_positions = [line.find(mark) for mark in close_marks if mark in line]
+            if close_positions:
+                tail = line[min(close_positions) + 1 :].strip()
+                if tail:
+                    kept_lines.append(tail)
+                in_quote_block = False
+            elif not line.strip():
+                in_quote_block = False
+            continue
+        if (
+            quote_line_re.match(line)
+            or marker_line_re.match(line)
+        ):
+            has_quote = True
+            close_positions = [line.find(mark) for mark in close_marks if mark in line]
+            if close_positions:
+                tail = line[min(close_positions) + 1 :].strip()
+                if tail:
+                    kept_lines.append(tail)
+                elif any(
+                    any(mark in later_line for mark in close_marks)
+                    for later_line in lines[index + 1 :]
+                ):
+                    in_quote_block = True
+            else:
+                in_quote_block = True
+            continue
+        kept_lines.append(line)
+    if lines:
+        text = "\n".join(kept_lines)
+
+    for pattern in (
+        r"(?:[「『]\s*)?[↪↩]\s*(?:引用消息|回复消息|引用的消息)[\s\S]*?[」』]",
+        r"[「『]\s*[↪↩]\s*引用消息[\s\S]*?[」』]",
+        r"[「『]\s*(?:引用消息|回复消息|引用的消息)[\s\S]*?[」』]",
+    ):
+        text, count = re.subn(pattern, "", text)
+        has_quote = has_quote or count > 0
+
+    return text, has_quote
+
+
+def _sanitize_dialog_prompt_info(value: Any) -> tuple[str, bool]:
+    text, has_quote = _strip_dialog_quote_content(value)
     text = re.sub(r"\[CQ:[^\]]+\]", "", text)
     text = re.sub(r"<at\b[^>]*>.*?</at>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"<at\b[^>]*/?>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip()
-    return text[:USER_USAGE_DIALOG_PROMPT_LENGTH]
+    return text[:USER_USAGE_DIALOG_PROMPT_LENGTH], has_quote
+
+
+def _sanitize_dialog_prompt(value: Any) -> str:
+    return _sanitize_dialog_prompt_info(value)[0]
+
+
+def _message_component_data(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        return item
+    for dump_name in ("model_dump", "dict"):
+        dump = getattr(item, dump_name, None)
+        if not callable(dump):
+            continue
+        try:
+            data = dump()
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _message_component_type(item: Any) -> str:
+    item_type = getattr(item, "type", "")
+    item_type_value = getattr(item_type, "value", item_type)
+    item_type_name = getattr(item_type, "name", "")
+    data = _message_component_data(item)
+    values = {
+        str(item_type_value or "").lower(),
+        str(item_type_name or "").lower(),
+        str(data.get("type") or "").lower(),
+        item.__class__.__name__.lower(),
+    }
+    for value in values:
+        if value in {"reply", "quote", "node", "forward"}:
+            return "quote"
+        if value in {"at", "componenttype.at"}:
+            return "at"
+        if value in {"text", "plain", "componenttype.plain"}:
+            return "text"
+        if "reply" in value or "quote" in value:
+            return "quote"
+    return ""
+
+
+def _message_component_text(item: Any) -> str:
+    data = _message_component_data(item)
+    nested_data = data.get("data")
+    if isinstance(nested_data, dict):
+        for name in ("text", "content", "message"):
+            value = nested_data.get(name)
+            if isinstance(value, str) and value:
+                return value
+    for name in ("text", "content", "message", "data"):
+        value = data.get(name)
+        if isinstance(value, str) and value:
+            return value
+    for name in ("text", "content", "message"):
+        value = getattr(item, name, None)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _message_component_key(item: Any) -> str:
+    data = _message_component_data(item)
+    if data:
+        try:
+            return json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return str(data)
+    return f"{item.__class__.__module__}.{item.__class__.__name__}:{id(item)}"
 
 
 def _sanitize_user_dialog(
@@ -107,10 +245,12 @@ def _sanitize_user_dialog(
         stat_id = int(raw_dialog.get("stat_id") or 0)
     except (TypeError, ValueError):
         stat_id = 0
+    prompt, has_quote = _sanitize_dialog_prompt_info(raw_dialog.get("prompt"))
     return {
         "stat_id": stat_id,
         "created_at": _iso_utc(created_at),
-        "prompt": _sanitize_dialog_prompt(raw_dialog.get("prompt")),
+        "prompt": prompt,
+        "has_quote": bool(raw_dialog.get("has_quote")) or has_quote,
         "tokens": tokens,
     }
 
@@ -342,6 +482,9 @@ class UserStatsMixin:
                     request_umo = str(raw_request.get("umo") or "").strip()[:256]
                     if not request_umo:
                         continue
+                    prompt, prompt_has_quote = _sanitize_dialog_prompt_info(
+                        raw_request.get("prompt")
+                    )
                     requests.append(
                         {
                             "started_at": _iso_utc(started_at),
@@ -353,9 +496,9 @@ class UserStatsMixin:
                             "conversation_id": str(
                                 raw_request.get("conversation_id") or ""
                             ).strip()[:128],
-                            "prompt": _sanitize_dialog_prompt(
-                                raw_request.get("prompt")
-                            ),
+                            "prompt": prompt,
+                            "has_quote": bool(raw_request.get("has_quote"))
+                            or prompt_has_quote,
                             "assigned_stat_ids": [
                                 int(stat_id)
                                 for stat_id in raw_request.get(
@@ -716,39 +859,40 @@ class UserStatsMixin:
         request_item: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         created_at = _to_utc_datetime(record.get("created_at")) or _now_utc()
+        prompt, has_quote = _sanitize_dialog_prompt_info(
+            (request_item or {}).get("prompt") or record.get("prompt")
+        )
         return {
             "stat_id": int(record.get("id") or 0),
             "created_at": _iso_utc(created_at),
-            "prompt": _sanitize_dialog_prompt(
-                (request_item or {}).get("prompt") or record.get("prompt")
-            ),
+            "prompt": prompt,
+            "has_quote": bool(record.get("has_quote"))
+            or bool((request_item or {}).get("has_quote"))
+            or has_quote,
             "tokens": max(0, int(tokens or 0)),
         }
 
-    def _find_prompt_for_usage_record(
+    def _find_request_for_usage_record(
         self,
         candidates: list[dict[str, Any]],
         record: dict[str, Any],
-    ) -> str:
+    ) -> dict[str, Any] | None:
         if not candidates:
-            return ""
+            return None
         stat_id = int(record.get("id") or 0)
         created_at = _to_utc_datetime(record.get("created_at"))
         started_at = _to_utc_datetime(record.get("started_at")) or created_at
         record_umo = str(record.get("umo") or "").strip()
         conversation_id = str(record.get("conversation_id") or "").strip()
         if not stat_id or started_at is None or not record_umo:
-            return ""
-        matched = self._match_user_usage_request(
+            return None
+        return self._match_user_usage_request(
             candidates,
             stat_id,
             record_umo,
             started_at,
             conversation_id,
         )
-        if not matched:
-            return ""
-        return _sanitize_dialog_prompt(matched.get("prompt"))
 
     def _assign_user_usage_records(
         self,
@@ -784,7 +928,9 @@ class UserStatsMixin:
             request_item["conversation_id"] = str(
                 request_item.get("conversation_id") or ""
             ).strip()[:128]
-            request_item["prompt"] = _sanitize_dialog_prompt(request_item.get("prompt"))
+            prompt, has_quote = _sanitize_dialog_prompt_info(request_item.get("prompt"))
+            request_item["prompt"] = prompt
+            request_item["has_quote"] = bool(request_item.get("has_quote")) or has_quote
             assigned_stat_ids = {
                 int(stat_id)
                 for stat_id in request_item.get("assigned_stat_ids", [])
@@ -869,6 +1015,7 @@ class UserStatsMixin:
             request_umo = str(request_item.get("umo") or "").strip()
             if not user_id or not request_umo:
                 continue
+            prompt, has_quote = _sanitize_dialog_prompt_info(request_item.get("prompt"))
             candidates.append(
                 {
                     "_started_at_dt": started_at,
@@ -877,7 +1024,8 @@ class UserStatsMixin:
                     "conversation_id": str(
                         request_item.get("conversation_id") or ""
                     ).strip()[:128],
-                    "prompt": _sanitize_dialog_prompt(request_item.get("prompt")),
+                    "prompt": prompt,
+                    "has_quote": bool(request_item.get("has_quote")) or has_quote,
                 }
             )
         return candidates
@@ -1126,14 +1274,15 @@ class UserStatsMixin:
                         "conversation_id": str(conversation_id or ""),
                         "tokens": normalized_tokens,
                     }
-                    prompt = self._find_prompt_for_usage_record(
+                    matched = self._find_request_for_usage_record(
                         request_candidates,
                         record,
                     )
                     user_dialogs.setdefault(user_id, []).append(
                         self._user_dialog_from_record(
-                            {**record, "prompt": prompt},
+                            record,
                             normalized_tokens,
+                            matched,
                         )
                     )
                     continue
@@ -1328,14 +1477,15 @@ class UserStatsMixin:
                         "tokens": normalized_tokens,
                     }
                     if user_id:
-                        prompt = self._find_prompt_for_usage_record(
+                        matched = self._find_request_for_usage_record(
                             request_candidates,
                             record,
                         )
                         dialogs.setdefault(user_id, []).append(
                             self._user_dialog_from_record(
-                                {**record, "prompt": prompt},
+                                record,
                                 normalized_tokens,
+                                matched,
                             )
                         )
                         continue
@@ -1514,7 +1664,10 @@ class UserStatsMixin:
                 requests = []
                 group_data["requests"] = requests
                 changed = True
-            prompt_text = _sanitize_dialog_prompt(prompt)
+            event_prompt, event_has_quote = self._event_user_prompt_text(event)
+            prompt_source = event_prompt if event_prompt else prompt
+            prompt_text, has_quote = _sanitize_dialog_prompt_info(prompt_source)
+            has_quote = has_quote or event_has_quote
             started_at = datetime.fromtimestamp(
                 float(getattr(event, "created_at", 0) or 0),
                 timezone.utc,
@@ -1526,6 +1679,7 @@ class UserStatsMixin:
                 "nickname": nickname,
                 "conversation_id": str(conversation_id or "").strip()[:128],
                 "prompt": prompt_text,
+                "has_quote": has_quote,
                 "assigned_stat_ids": [],
             }
             for existing_request in requests:
@@ -1544,6 +1698,8 @@ class UserStatsMixin:
                         ]
                     if prompt_text:
                         existing_request["prompt"] = prompt_text
+                    if has_quote:
+                        existing_request["has_quote"] = True
                     break
             else:
                 requests.append(request_item)
@@ -1554,6 +1710,86 @@ class UserStatsMixin:
             return
         self._user_cached_stats = stats
         self._save_user_stats(stats)
+
+    @staticmethod
+    def _iter_event_message_items(event: Any) -> list[Any]:
+        candidates = []
+        message_obj = getattr(event, "message_obj", None)
+        if message_obj is not None:
+            candidates.extend(
+                [
+                    getattr(message_obj, "message", None),
+                    getattr(message_obj, "chain", None),
+                ]
+            )
+
+        for getter_name in ("get_messages", "get_message_chain", "get_message"):
+            getter = getattr(event, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                candidates.append(getter())
+            except Exception:
+                continue
+
+        items = []
+        seen_keys: set[str] = set()
+        for candidate in candidates:
+            if isinstance(candidate, (list, tuple)):
+                candidate_items = candidate
+            else:
+                candidate_items = []
+                chain = getattr(candidate, "chain", None)
+                message = getattr(candidate, "message", None)
+                if isinstance(chain, (list, tuple)):
+                    candidate_items.extend(chain)
+                if isinstance(message, (list, tuple)):
+                    candidate_items.extend(message)
+            for item in candidate_items:
+                key = _message_component_key(item)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                items.append(item)
+            if isinstance(candidate, (list, tuple)):
+                continue
+        return items
+
+    def _event_user_prompt_text(self, event: Any) -> tuple[str, bool]:
+        parts: list[str] = []
+        has_quote = False
+        for item in self._iter_event_message_items(event):
+            item_kind = _message_component_type(item)
+            if item_kind == "quote":
+                has_quote = True
+                continue
+            if item_kind == "at":
+                continue
+            text = _message_component_text(item)
+            cleaned, item_has_quote = _sanitize_dialog_prompt_info(text)
+            has_quote = has_quote or item_has_quote
+            if cleaned and (not parts or parts[-1] != cleaned):
+                parts.append(cleaned)
+        if parts:
+            return " ".join(parts), has_quote
+
+        for getter_name in ("get_message_str", "get_raw_message"):
+            getter = getattr(event, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                text = str(getter() or "")
+            except Exception:
+                continue
+            cleaned, item_has_quote = _sanitize_dialog_prompt_info(text)
+            has_quote = has_quote or item_has_quote
+            if cleaned:
+                return cleaned, has_quote
+
+        message_obj = getattr(event, "message_obj", None)
+        raw_message = str(getattr(message_obj, "raw_message", "") or "")
+        cleaned, item_has_quote = _sanitize_dialog_prompt_info(raw_message)
+        return cleaned, has_quote or item_has_quote
 
     @staticmethod
     def _event_user_id(event: Any) -> str:
@@ -1780,6 +2016,7 @@ class UserStatsMixin:
                 {
                     "stat_id": int(dialog.get("stat_id") or 0),
                     "prompt": _sanitize_dialog_prompt(dialog.get("prompt")) or "（无文本）",
+                    "has_quote": bool(dialog.get("has_quote")),
                     "tokens": tokens,
                     "display": _format_user_tokens(tokens),
                     "time": local_created_at.strftime("%H:%M:%S"),
